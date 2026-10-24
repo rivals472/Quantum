@@ -14921,6 +14921,7 @@ local lightingService     = game:GetService("Lighting")
 local workspaceService    = game:GetService("Workspace")
 local starterGui          = game:GetService("StarterGui")
 local textChatService     = game:GetService("TextChatService")
+local replicatedStorage   = game:GetService("ReplicatedStorage")
 
 -- Values that are tweakable at runtime.
 local vals = {
