@@ -16415,6 +16415,10 @@ local applyWireframeSkin, removeWireframeSkin, startMotionBlur, stopMotionBlur
 local initRivals, rivals, rivalsStatusText, cosmeticHooked, hookRivalsCosmetics
 local flickbotStep, headMarkerStep, headMarkers
 local applyBloom, applySunRays, applyColorGrading
+local activeAnimTrack, playAnimation, hackerDetectorStep
+local startViewmodelOffset, stopViewmodelOffset, applyViewmodelPreset
+local startViewmodelWire, stopViewmodelWire
+local startHideMuzzle, stopHideMuzzle, airSpeedStep, autoPickupStep
 
 ;(function() -- nested IIFE #2 to isolate register budget for spoofer+skin+rivals+kicia
 
@@ -17118,8 +17122,6 @@ applyColorGrading = function(state)
 	end
 end
 
-end)() -- end nested IIFE #2
-
 -- Viewmodel Offset (6-DOF: position X/Y/Z + rotation Pitch/Yaw/Roll).
 local vmOffsetConn
 local vmOffsetOriginal = {}
@@ -17149,13 +17151,13 @@ local function applyViewmodelOffset()
 		root.CFrame = cam.CFrame * offsetCF
 	end)
 end
-local function startViewmodelOffset()
+startViewmodelOffset = function()
 	if vmOffsetConn then return end
 	vmOffsetConn = runService.RenderStepped:Connect(function()
 		if toggles.ViewmodelOffset then applyViewmodelOffset() end
 	end)
 end
-local function stopViewmodelOffset()
+stopViewmodelOffset = function()
 	if vmOffsetConn then vmOffsetConn:Disconnect(); vmOffsetConn = nil end
 	vmOffsetOriginal = {}
 end
@@ -17173,7 +17175,7 @@ local VM_PRESETS = {
 	BehindBack= { x = 0,    y = -0.8, z = 0.8,  p = 45,  y_rot = 180, r = 0   },
 	HeadLevel = { x = 0,    y = 0.2,  z = -0.1, p = 10,  y_rot = 0,   r = 0   },
 }
-local function applyViewmodelPreset(name)
+applyViewmodelPreset = function(name)
 	local p = VM_PRESETS[name]; if not p then return end
 	vals.ViewOffsetX = p.x; vals.ViewOffsetY = p.y; vals.ViewOffsetZ = p.z
 	vals.ViewRotPitch = p.p; vals.ViewRotYaw = p.y_rot; vals.ViewRotRoll = p.r
@@ -17247,20 +17249,20 @@ local function restoreViewmodelWire()
 	end
 	vmWireState = {}
 end
-local function startViewmodelWire()
+startViewmodelWire = function()
 	if vmWireConn then return end
 	vmWireConn = runService.RenderStepped:Connect(function()
 		if toggles.ViewmodelWire then applyViewmodelWire() end
 	end)
 end
-local function stopViewmodelWire()
+stopViewmodelWire = function()
 	if vmWireConn then vmWireConn:Disconnect(); vmWireConn = nil end
 	restoreViewmodelWire()
 end
 
 -- Hide Muzzle Flash / Game Tracers.
 local muzzleConn
-local function startHideMuzzle()
+startHideMuzzle = function()
 	if muzzleConn then return end
 	muzzleConn = workspaceService.DescendantAdded:Connect(function(d)
 		if not toggles.HideMuzzleFlash then return end
@@ -17271,12 +17273,12 @@ local function startHideMuzzle()
 		end
 	end)
 end
-local function stopHideMuzzle()
+stopHideMuzzle = function()
 	if muzzleConn then muzzleConn:Disconnect(); muzzleConn = nil end
 end
 
 -- Air Speed.
-local function airSpeedStep()
+airSpeedStep = function()
 	if not toggles.AirSpeed then return end
 	local char = localPlayer.Character
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -17292,7 +17294,7 @@ end
 
 -- Auto Pickup Drops (NPC drops / loot proximity).
 local pickupLast = 0
-local function autoPickupStep(now)
+autoPickupStep = function(now)
 	if not toggles.AutoPickup then return end
 	if now - pickupLast < 0.5 then return end
 	pickupLast = now
@@ -17339,8 +17341,8 @@ for _, p in ipairs(playersService:GetPlayers()) do
 end
 
 -- Animation Player.
-local activeAnimTrack
-local function playAnimation()
+-- forward-declared: activeAnimTrack
+playAnimation = function()
 	local char = localPlayer.Character
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
 	if not hum then return end
@@ -17358,7 +17360,7 @@ end
 
 -- Hacker Detector (score-based: track velocity + headshots).
 local hackerScores = {}
-local function hackerDetectorStep()
+hackerDetectorStep = function()
 	if not toggles.HackerDetector then return end
 	for _, p in ipairs(playersService:GetPlayers()) do
 		if p == localPlayer or p.Character == nil then continue end
@@ -17378,7 +17380,6 @@ end
 
 -- Mod Detector (checks for Roblox staff / mod attributes).
 -- When a mod joins, applies the configured response (Notify / Leave / ToLobby).
-;(function() -- nested IIFE to isolate register budget for the detector+pro section
 local modDetected = {}
 local MOD_GROUPS = {
 	1200769,   -- Roblox staff group
