@@ -1,31 +1,41 @@
--- Quantum v2 - KiciaHook Premium + Yabujin Skin Changer
--- Press F4 to open Yabujin Skin Changer (loads on first press)
--- KiciaHook Premium menu opens by default (its own UI).
+-- Quantum v3 - Obsidian UI + KiciaHook config bridge + Yabujin F4
+-- Load order: Obsidian -> Yabujin wrapper -> KiciaHook (with store exposure patch) -> Obsidian UI wiring
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local localPlayer = Players.LocalPlayer
 
 -- =============================================================================
--- Yabujin loader (loads on demand via F4 key)
+-- Obsidian UI loader
+-- =============================================================================
+local Library, ThemeManager, SaveManager
+local ok, err = pcall(function()
+    local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
+    Library       = loadstring(game:HttpGet(repo .. "Library.lua"))()
+    ThemeManager  = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+    SaveManager   = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+end)
+if not Library then
+    warn("[Quantum] Obsidian failed, falling back to Linoria")
+    local repo = "https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/"
+    Library       = loadstring(game:HttpGet(repo .. "Library.lua"))()
+    ThemeManager  = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+    SaveManager   = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+end
+if not Library then error("[Quantum] No UI library could be loaded") end
+
+-- =============================================================================
+-- Yabujin loader (F4 to open)
 -- =============================================================================
 local yabujinLoaded = false
 local function openYabujin()
     if yabujinLoaded then
-        pcall(function()
-            game:GetService("StarterGui"):SetCore("SendNotification", {
-                Title = "Quantum", Text = "Yabujin already loaded", Duration = 3,
-            })
-        end)
+        pcall(function() if Library.Notify then Library:Notify("Yabujin already loaded", 3) end end)
         return
     end
     yabujinLoaded = true
-    pcall(function()
-        game:GetService("StarterGui"):SetCore("SendNotification", {
-            Title = "Quantum", Text = "Loading Yabujin Skin Changer...", Duration = 3,
-        })
-    end)
-    local ok, yErr = pcall(function()
+    pcall(function() if Library.Notify then Library:Notify("Loading Yabujin...", 3) end end)
+    local okY, yErr = pcall(function()
         local environment = getfenv()
         if not environment.__YabujinOptions then
             environment.__YabujinOptions = { AutoStart = true }
@@ -14900,37 +14910,56 @@ if options.AutoStart~=false and game then
 end
 return runtime
     end)
-    if not ok then
+    if not okY then
         warn("[Quantum] Yabujin load failed: " .. tostring(yErr))
-        pcall(function()
-            game:GetService("StarterGui"):SetCore("SendNotification", {
-                Title = "Quantum",
-                Text = "Yabujin failed: " .. tostring(yErr):sub(1, 100),
-                Duration = 5,
-            })
-        end)
     end
 end
 
--- F4 keybind to open Yabujin
+-- F4 keybind for Yabujin
 UserInputService.InputBegan:Connect(function(input, gpe)
     if gpe then return end
-    if input.KeyCode == Enum.KeyCode.F4 then
-        openYabujin()
-    end
-end)
-
--- Startup notification
-pcall(function()
-    game:GetService("StarterGui"):SetCore("SendNotification", {
-        Title = "Quantum Loaded",
-        Text = "Press F4 for Skin Changer | KiciaHook UI below",
-        Duration = 6,
-    })
+    if input.KeyCode == Enum.KeyCode.F4 then openYabujin() end
 end)
 
 -- =============================================================================
--- KiciaHook Premium (full source below)
+-- Expose KiciaHook store so Obsidian UI can bind to it.
+-- =============================================================================
+local function waitForKiciaStore(timeout)
+    local t0 = os.clock()
+    while not _G.__KiciaStore do
+        if os.clock() - t0 > (timeout or 10) then return nil end
+        task.wait(0.1)
+    end
+    return _G.__KiciaStore
+end
+
+-- =============================================================================
+-- Snapshot CoreGui children BEFORE KiciaHook loads so we can identify
+-- the ScreenGuis it creates (not just the ones from createScreenGui).
+-- =============================================================================
+local coreGuiService = (gethui and gethui()) or game:GetService("CoreGui")
+_G.__QuantumPreKpGuis = {}
+for _, child in ipairs(coreGuiService:GetChildren()) do
+    _G.__QuantumPreKpGuis[child] = true
+end
+
+-- Nuclear hide: Instance.new hook so every ScreenGui KP creates is immediately disabled.
+-- Store the hook in _G so we can disable it later.
+_G.__QuantumInstanceNew = Instance.new
+local realInstanceNew = Instance.new
+Instance.new = function(className, parent)
+    local inst = realInstanceNew(className, parent)
+    if className == "ScreenGui" then
+        pcall(function()
+            inst.Name = "QuantumKillMe_hooked_" .. tostring(math.random(1, 999999))
+            inst.Enabled = false
+        end)
+    end
+    return inst
+end
+
+-- =============================================================================
+-- KiciaHook Premium (patched below with store exposure)
 -- =============================================================================
 --==========================================================================
 --  Kicia Rebuild  -  Rivals
@@ -33011,7 +33040,9 @@ end
 
 local function createScreenGui(displayOrder, enabled)
 local screenGui = Instance.new("ScreenGui")
-screenGui.Enabled = enabled
+screenGui.Name = "QuantumKillMe_" .. tostring(displayOrder)  -- Quantum tag
+screenGui.Enabled = false  -- Quantum: force disabled (hide KiciaHook UI)
+if false then screenGui.Enabled = enabled end  -- was: screenGui.Enabled = enabled
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.IgnoreGuiInset = true
 screenGui.DisplayOrder = displayOrder
@@ -81503,6 +81534,7 @@ end })
 
 local boot = (function()
     local store = tbl17.bG()
+    _G.__KiciaStore = store  -- Quantum: expose store for Obsidian bridge
     local profiles = GlobalTrove:Add(tbl17.bN().new(store))
     store:UseMiddleware(profiles)
     local fonts = tbl17.az()
@@ -81577,3 +81609,583 @@ if not started then
     K.Unload()
     error("[Kicia Rebuild] startup failed:\n" .. startupError, 0)
 end
+
+-- =============================================================================
+-- Obsidian UI with KiciaHook config bridges
+-- =============================================================================
+task.spawn(function()
+    local Store = waitForKiciaStore(15)
+
+    -- IMPORTANT: unhook Instance.new so Obsidian can create its own ScreenGui normally.
+    pcall(function() Instance.new = _G.__QuantumInstanceNew or Instance.new end)
+
+    -- Force KiciaHook ScreenGuis to stay hidden - any ScreenGui in CoreGui that
+    -- wasn't there before KP loaded, and isn't ours.
+    task.spawn(function()
+        local coreGui = (gethui and gethui()) or game:GetService("CoreGui")
+        while task.wait(0.5) do
+            for _, child in ipairs(coreGui:GetChildren()) do
+                if not child:IsA("ScreenGui") then continue end
+                local n = child.Name
+                if n:sub(1, 14) == "QuantumKillMe_" then
+                    if child.Enabled then pcall(function() child.Enabled = false end) end
+                end
+            end
+        end
+    end)
+
+    if not Store then
+        warn("[Quantum] KiciaStore not found, UI bridge disabled")
+        return
+    end
+    pcall(function() if Library.Notify then Library:Notify("Quantum UI loaded", 3) end end)
+
+    -- Build the main Obsidian window.
+    local Window = Library:CreateWindow({
+        Title = "Quantum",
+        Center = true, AutoShow = true, TabPadding = 8, MenuFadeTime = 0.2,
+    })
+
+    -- Bridge helpers. Each creates an Obsidian widget and wires it to Store:Get/Set.
+    local function safeGet(path)
+        local ok, v = pcall(function() return Store:Get(path) end)
+        if ok then return v end
+        return nil
+    end
+    local function safeSet(path, v)
+        pcall(function() Store:Set(path, v) end)
+    end
+
+    local function bindToggle(group, flag, label, path)
+        local def = safeGet(path)
+        if type(def) ~= "boolean" then def = false end
+        local t = group:AddToggle(flag, { Text = label, Default = def })
+        t:OnChanged(function(v) safeSet(path, v) end)
+        -- Keep in sync when backend changes the value
+        task.spawn(function()
+            while task.wait(0.5) do
+                local cur = safeGet(path)
+                if type(cur) == "boolean" and Toggles[flag] and Toggles[flag].Value ~= cur then
+                    Toggles[flag]:SetValue(cur)
+                end
+            end
+        end)
+    end
+
+    local function bindSlider(group, flag, label, mn, mx, rounding, path)
+        local def = safeGet(path)
+        if type(def) ~= "number" then def = mn end
+        local s = group:AddSlider(flag, {
+            Text = label, Default = def, Min = mn, Max = mx, Rounding = rounding, Suffix = "",
+        })
+        s:OnChanged(function(v) safeSet(path, v) end)
+    end
+
+    local function bindDropdown(group, flag, label, options, multi, path)
+        local def = safeGet(path)
+        if multi then
+            local defTable = {}
+            if type(def) == "table" then
+                for _, v in ipairs(def) do defTable[v] = true end
+            end
+            local d = group:AddDropdown(flag, {
+                Values = options, Default = 1, Multi = true, Text = label,
+            })
+            if next(defTable) then pcall(function() d:SetValue(defTable) end) end
+            d:OnChanged(function(v)
+                local arr = {}
+                if type(v) == "table" then
+                    for k, enabled in pairs(v) do if enabled then arr[#arr+1] = k end end
+                end
+                safeSet(path, arr)
+            end)
+        else
+            local defIdx = 1
+            if type(def) == "string" then
+                for i, o in ipairs(options) do if o == def then defIdx = i; break end end
+            end
+            local d = group:AddDropdown(flag, {
+                Values = options, Default = defIdx, Multi = false, Text = label,
+            })
+            d:OnChanged(function(v) safeSet(path, v) end)
+        end
+    end
+
+    local function bindColor(group, flag, label, path)
+        local def = safeGet(path)
+        local defC = (typeof(def) == "Color3") and def or Color3.fromRGB(255, 255, 255)
+        local c = group:AddColorPicker(flag, { Default = defC, Title = label })
+        c:OnChanged(function()
+            safeSet(path, Options[flag].Value)
+        end)
+    end
+
+    local function bindRangeSlider(group, flag, label, mn, mx, path)
+        -- Obsidian may not have RangeSlider either; fall back to a single slider.
+        local s = group:AddSlider(flag, {
+            Text = label .. " (range)", Default = mn, Min = mn, Max = mx, Rounding = 0, Suffix = "",
+        })
+        s:OnChanged(function(v) safeSet(path, { Min = v, Max = v }) end)
+    end
+
+    local function bindInput(group, flag, label, path)
+        local def = safeGet(path)
+        if type(def) ~= "string" then def = "" end
+        local i = group:AddInput(flag, {
+            Default = def, Numeric = false, Text = label, Placeholder = "",
+            Finished = true,
+        })
+        i:OnChanged(function(v) safeSet(path, v) end)
+    end
+
+    -- Catch failures silently so one bad widget doesn't kill the whole UI.
+    local function try(fn) pcall(fn) end
+
+    -- -------- Generated widget wiring begins --------
+-- =============== Tab: main ===============
+do
+    local Tab = Window:AddTab("main")
+    local G = Tab:AddLeftGroupbox("Aimbot")
+    bindDropdown(G, "KH_Aimbot_ActivationConditions_1", "Activation Rules", {"Default"}, true, {"Aimbot","ActivationConditions"})
+    bindSlider(G, "KH_Aimbot_ReactionTime_2", "Reaction Delay (s)", 0.0, 2.0, 2, {"Aimbot","ReactionTime"})
+    bindSlider(G, "KH_Aimbot_SwitchDelay_3", "Switch Delay (s)", 0.0, 2.0, 2, {"Aimbot","SwitchDelay"})
+    bindDropdown(G, "KH_Aimbot_Type_4", "Aim Mode", {"Default"}, false, {"Aimbot","Mode","Type"})
+    bindSlider(G, "KH_Aimbot_Speed_5", "Linear Speed", 0.01, 1.0, 2, {"Aimbot","Mode","Speed"})
+    bindSlider(G, "KH_Aimbot_Speed_6", "AI Speed", 0.01, 1.0, 2, {"Aimbot","Mode","Speed"})
+    bindSlider(G, "KH_Aimbot_Speed_7", "Spring Speed", 0.01, 1.0, 2, {"Aimbot","Mode","Speed"})
+    bindToggle(G, "KH_Aimbot_Enabled_8", "Enable Target Lock", {"Aimbot","TargetLock","Enabled"})
+    bindDropdown(G, "KH_Aimbot_Mode_9", "Lock Mode", {"ToggleLock","AutoLock","ManualOnly"}, false, {"Aimbot","TargetLock","Mode"})
+    local G = Tab:AddRightGroupbox("SilentAim")
+    bindToggle(G, "KH_SilentAim_Enabled_10", "Manipulate", {"SilentAim","Manipulate","Enabled"})
+    bindDropdown(G, "KH_SilentAim_Manipulate_11", "Manipulation Check", {"OnBestTarget","OnAllTargets"}, false, {"SilentAim","Manipulate"})
+    bindToggle(G, "KH_SilentAim_ShowIndicator_12", "Show Indicator", {"SilentAim","Manipulate","ShowIndicator"})
+    bindSlider(G, "KH_SilentAim_ActivationChance_13", "Activation Chance (%)", 0.0, 100.0, 0, {"SilentAim","ActivationChance"})
+    bindDropdown(G, "KH_SilentAim_ActivationConditions_14", "Activation Rules", {"Default"}, true, {"SilentAim","ActivationConditions"})
+    bindSlider(G, "KH_SilentAim_ReactionTime_15", "Reaction Delay (s)", 0.0, 2.0, 2, {"SilentAim","ReactionTime"})
+    bindSlider(G, "KH_SilentAim_SwitchDelay_16", "Switch Delay (s)", 0.0, 2.0, 2, {"SilentAim","SwitchDelay"})
+    local G = Tab:AddLeftGroupbox("Triggerbot")
+    bindDropdown(G, "KH_Triggerbot_ActivationConditions_17", "Activation Rules", {"Default"}, true, {"Triggerbot","ActivationConditions"})
+    bindDropdown(G, "KH_Triggerbot_TargetConditions_18", "Target Filters", {"Default"}, true, {"Triggerbot","TargetConditions"})
+    bindSlider(G, "KH_Triggerbot_ReactionTime_19", "Reaction Delay (s)", 0.0, 2.0, 2, {"Triggerbot","ReactionTime"})
+    bindSlider(G, "KH_Triggerbot_ReleaseTime_20", "Release Delay (s)", 0.0, 2.0, 2, {"Triggerbot","ReleaseTime"})
+    local G = Tab:AddRightGroupbox("Flickbot")
+    bindToggle(G, "KH_Flickbot_Shoot_21", "Shoot", {"Flickbot","Shoot"})
+    bindSlider(G, "KH_Flickbot_ShotDelay_22", "Shot Delay (ms)", 0.0, 250.0, 0, {"Flickbot","ShotDelay"})
+    bindSlider(G, "KH_Flickbot_Cooldown_23", "Cooldown (ms)", 0.0, 2000.0, 0, {"Flickbot","Cooldown"})
+    bindSlider(G, "KH_Flickbot_FlickDuration_24", "Flick Duration (ms)", 30.0, 400.0, 0, {"Flickbot","FlickDuration"})
+    bindSlider(G, "KH_Flickbot_Curvature_25", "Curvature", 0.0, 50.0, 0, {"Flickbot","Curvature"})
+    bindSlider(G, "KH_Flickbot_Humanness_26", "Humanness", 0.0, 100.0, 0, {"Flickbot","Humanness"})
+    local G = Tab:AddLeftGroupbox("Ragebot")
+    bindToggle(G, "KH_Ragebot_UtilizeHealthLead_27", "Utilize Health Lead", {"Ragebot","UtilizeHealthLead"})
+    bindToggle(G, "KH_Ragebot_Enabled_28", "Enabled", {"Ragebot","Weapons","Enabled"})
+    bindToggle(G, "KH_Ragebot_PrioritizeHackers_29", "Prioritize Hackers", {"Ragebot","PrioritizeHackers"})
+    bindSlider(G, "KH_Ragebot_Stability_30", "Stability", 0.0, 1.5, 2, {"Ragebot","Stability"})
+    bindSlider(G, "KH_Ragebot_ShootFrames_31", "Shoot Frames", 1.0, 5.0, 0, {"Ragebot","ShootFrames"})
+    bindToggle(G, "KH_Ragebot_Enabled_32", "Enabled", {"Ragebot","Weapons","Enabled"})
+    bindDropdown(G, "KH_Ragebot_OnEmpty_33", "On Empty", {"Reload","Swap","SwapOrReload"}, false, {"Ragebot","Weapons","OnEmpty"})
+    bindRangeSlider(G, "KH_Ragebot_DepthForward_34", "Forward Depth", 0.0, 10.0, {"Ragebot","Evasion","ProjectileBreaker","DepthForward"})
+    bindSlider(G, "KH_Ragebot_DepthForwardFrequency_35", "Forward Frequency", 0.0, 20.0, 1, {"Ragebot","Evasion","ProjectileBreaker","DepthForwardFrequency"})
+    bindRangeSlider(G, "KH_Ragebot_DepthUp_36", "Upward Depth", 0.0, 10.0, {"Ragebot","Evasion","ProjectileBreaker","DepthUp"})
+    bindSlider(G, "KH_Ragebot_DepthUpFrequency_37", "Upward Frequency", 0.0, 20.0, 1, {"Ragebot","Evasion","ProjectileBreaker","DepthUpFrequency"})
+    bindSlider(G, "KH_Ragebot_RepositionInterval_38", "Reposition Interval (s)", 0.05, 2.0, 2, {"Ragebot","Evasion","ProjectileBreaker","RepositionInterval"})
+    bindToggle(G, "KH_Ragebot_FallbackAnchorFromCharacter_39", "Fallback Character Origin", {"Ragebot","Evasion","ProjectileBreaker","FallbackAnchorFromCharacter"})
+    bindSlider(G, "KH_Ragebot_FallbackBaseRadius_40", "Fallback Radius", 5.0, 100000000.0, 0, {"Ragebot","Evasion","ProjectileBreaker","FallbackBaseRadius"})
+    bindSlider(G, "KH_Ragebot_FallbackRadiusRandomFactor_41", "Fallback Random Factor", 0.0, 1.0, 1, {"Ragebot","Evasion","ProjectileBreaker","FallbackRadiusRandomFactor"})
+    bindDropdown(G, "KH_Ragebot_Mode_42", "Evasion Mode", {"Off","Random","Translocate","ProjectileBreaker"}, false, {"Ragebot","Evasion","Mode"})
+    bindToggle(G, "KH_Ragebot_AnchorFromCharacter_43", "Character Origin", {"Ragebot","Evasion","Random","AnchorFromCharacter"})
+    bindSlider(G, "KH_Ragebot_BaseRadius_44", "Base Radius", 5.0, 100000000.0, 0, {"Ragebot","Evasion","Random","BaseRadius"})
+    bindSlider(G, "KH_Ragebot_RadiusRandomFactor_45", "Random Factor", 0.0, 1.0, 1, {"Ragebot","Evasion","Random","RadiusRandomFactor"})
+    bindSlider(G, "KH_Ragebot_Offset_46", "Offset", -5.0, 5.0, 1, {"Ragebot","Evasion","Translocate","Offset"})
+    local G = Tab:AddRightGroupbox("TargetConditions")
+    bindDropdown(G, "KH_TargetConditions_TargetConditions_47", "Target Filters", {"Default"}, true, {"TargetConditions"})
+end
+
+-- =============== Tab: world ===============
+do
+    local Tab = Window:AddTab("world")
+    local G = Tab:AddLeftGroupbox("Lighting")
+    bindToggle(G, "KH_Lighting_Enabled_48", "Enable Lighting Override", {"Lighting","Enabled"})
+    bindToggle(G, "KH_Lighting_Enabled_49", "Clock Time", {"Lighting","ClockTime","Enabled"})
+    bindSlider(G, "KH_Lighting_Value_50", "Time", 0.0, 24.0, 2, {"Lighting","ClockTime","Value"})
+    bindToggle(G, "KH_Lighting_Enabled_51", "Geographic Latitude", {"Lighting","GeographicLatitude","Enabled"})
+    bindSlider(G, "KH_Lighting_Value_52", "Latitude", -90.0, 90.0, 2, {"Lighting","GeographicLatitude","Value"})
+    bindToggle(G, "KH_Lighting_Enabled_53", "Brightness", {"Lighting","Brightness","Enabled"})
+    bindSlider(G, "KH_Lighting_Value_54", "Brightness", 0.0, 10.0, 2, {"Lighting","Brightness","Value"})
+    bindToggle(G, "KH_Lighting_Enabled_55", "Exposure Compensation", {"Lighting","ExposureCompensation","Enabled"})
+    bindSlider(G, "KH_Lighting_Value_56", "Exposure", -5.0, 5.0, 2, {"Lighting","ExposureCompensation","Value"})
+    bindToggle(G, "KH_Lighting_DisableGlobalShadows_57", "Disable Global Shadows", {"Lighting","DisableGlobalShadows"})
+    bindToggle(G, "KH_Lighting_Enabled_58", "Shadow Softness", {"Lighting","ShadowSoftness","Enabled"})
+    bindSlider(G, "KH_Lighting_Value_59", "Softness", 0.0, 1.0, 2, {"Lighting","ShadowSoftness","Value"})
+    bindToggle(G, "KH_Lighting_Enabled_60", "Lighting Style", {"Lighting","LightingStyle","Enabled"})
+    bindDropdown(G, "KH_Lighting_Value_61", "Style", {"Realistic","Soft"}, false, {"Lighting","LightingStyle","Value"})
+    bindToggle(G, "KH_Lighting_Enabled_62", "Shadow Color", {"Lighting","ShadowColor","Enabled"})
+    bindColor(G, "KH_Lighting_Value_63", "Value", {"Lighting","ShadowColor","Value"})
+    bindToggle(G, "KH_Lighting_PrioritizeLightingQuality_64", "Prioritize Lighting Quality", {"Lighting","PrioritizeLightingQuality"})
+    bindToggle(G, "KH_Lighting_Enabled_65", "Ambient Colors", {"Lighting","Ambient","Enabled"})
+    bindColor(G, "KH_Lighting_Indoor_66", "Indoor", {"Lighting","Ambient","Indoor"})
+    bindColor(G, "KH_Lighting_Outdoor_67", "Outdoor", {"Lighting","Ambient","Outdoor"})
+    bindToggle(G, "KH_Lighting_Enabled_68", "Color Shift", {"Lighting","ColorShift","Enabled"})
+    bindColor(G, "KH_Lighting_Top_69", "Top", {"Lighting","ColorShift","Top"})
+    bindColor(G, "KH_Lighting_Bottom_70", "Bottom", {"Lighting","ColorShift","Bottom"})
+    bindToggle(G, "KH_Lighting_Enabled_71", "Environment Diffuse Scale", {"Lighting","EnvironmentDiffuseScale","Enabled"})
+    bindSlider(G, "KH_Lighting_Value_72", "Diffuse Scale", 0.0, 1.0, 2, {"Lighting","EnvironmentDiffuseScale","Value"})
+    bindToggle(G, "KH_Lighting_Enabled_73", "Environment Specular Scale", {"Lighting","EnvironmentSpecularScale","Enabled"})
+    bindSlider(G, "KH_Lighting_Value_74", "Specular Scale", 0.0, 1.0, 2, {"Lighting","EnvironmentSpecularScale","Value"})
+    bindToggle(G, "KH_Lighting_Enabled_75", "Fog", {"Lighting","Fog","Enabled"})
+    bindColor(G, "KH_Lighting_Color_76", "Color", {"Lighting","Fog","Color"})
+    bindSlider(G, "KH_Lighting_Start_77", "Fog Start", 0.0, 10000.0, 0, {"Lighting","Fog","Start"})
+    bindSlider(G, "KH_Lighting_End_78", "Fog End", 0.0, 10000.0, 0, {"Lighting","Fog","End"})
+    local G = Tab:AddRightGroupbox("Weather")
+    bindToggle(G, "KH_Weather_Enabled_79", "Enable Weather", {"Weather","Enabled"})
+    bindColor(G, "KH_Weather_Color_80", "Color", {"Weather","Color"})
+    bindDropdown(G, "KH_Weather_Preset_81", "Preset", {"Snow","Rain","Blizzard"}, false, {"Weather","Preset"})
+    bindSlider(G, "KH_Weather_Intensity_82", "Intensity", 0.0, 2.0, 2, {"Weather","Intensity"})
+    bindSlider(G, "KH_Weather_Rate_83", "Rate", 0.0, 3.0, 2, {"Weather","Rate"})
+    bindSlider(G, "KH_Weather_Height_84", "Height", 10.0, 100.0, 0, {"Weather","Height"})
+    bindSlider(G, "KH_Weather_Speed_85", "Speed", 0.5, 3.0, 2, {"Weather","Speed"})
+    bindSlider(G, "KH_Weather_Glow_86", "Glow", 0.0, 1.0, 2, {"Weather","Glow"})
+    bindSlider(G, "KH_Weather_Size_87", "Size", 0.5, 2.0, 2, {"Weather","Size"})
+    bindSlider(G, "KH_Weather_Spread_88", "Spread", 0.0, 3.0, 2, {"Weather","Spread"})
+    bindSlider(G, "KH_Weather_Strength_89", "Wind Strength", 0.0, 20.0, 1, {"Weather","Wind","Strength"})
+    bindSlider(G, "KH_Weather_Angle_90", "Wind Angle", 0.0, 360.0, 0, {"Weather","Wind","Angle"})
+    local G = Tab:AddLeftGroupbox("Atmosphere")
+    bindToggle(G, "KH_Atmosphere_Enabled_91", "Atmosphere", {"Atmosphere","Enabled"})
+    bindColor(G, "KH_Atmosphere_Color_92", "Color", {"Atmosphere","Color"})
+    bindColor(G, "KH_Atmosphere_Decay_93", "Decay", {"Atmosphere","Decay"})
+    bindSlider(G, "KH_Atmosphere_Density_94", "Density", 0.0, 1.0, 2, {"Atmosphere","Density"})
+    bindSlider(G, "KH_Atmosphere_Offset_95", "Offset", 0.0, 1.0, 2, {"Atmosphere","Offset"})
+    bindSlider(G, "KH_Atmosphere_Glare_96", "Glare", 0.0, 1.0, 2, {"Atmosphere","Glare"})
+    bindSlider(G, "KH_Atmosphere_Haze_97", "Haze", 0.0, 1.0, 2, {"Atmosphere","Haze"})
+    local G = Tab:AddRightGroupbox("Skybox")
+    bindToggle(G, "KH_Skybox_Enabled_98", "Enable Skybox", {"Skybox","Enabled"})
+    bindDropdown(G, "KH_Skybox_Preset_99", "Preset", {"Default"}, false, {"Skybox","Preset"})
+    local G = Tab:AddLeftGroupbox("Ambience")
+    bindToggle(G, "KH_Ambience_Enabled_100", "Enable Ambient Sound", {"Ambience","Enabled"})
+    bindDropdown(G, "KH_Ambience_Sound_101", "Preset", {"Default"}, false, {"Ambience","Sound"})
+    bindInput(G, "KH_Ambience_CustomSound_102", "Custom Sound (ID or URL)", {"Ambience","CustomSound"})
+    bindSlider(G, "KH_Ambience_Volume_103", "Volume", 0.0, 10.0, 2, {"Ambience","Volume"})
+    local G = Tab:AddRightGroupbox("ColorCorrection")
+    bindToggle(G, "KH_ColorCorrection_Enabled_104", "Color Correction", {"ColorCorrection","Enabled"})
+    bindColor(G, "KH_ColorCorrection_TintColor_105", "TintColor", {"ColorCorrection","TintColor"})
+    bindSlider(G, "KH_ColorCorrection_Saturation_106", "Saturation", -1.0, 1.0, 2, {"ColorCorrection","Saturation"})
+    bindSlider(G, "KH_ColorCorrection_Brightness_107", "Brightness", -1.0, 1.0, 2, {"ColorCorrection","Brightness"})
+    bindSlider(G, "KH_ColorCorrection_Contrast_108", "Contrast", -1.0, 1.0, 2, {"ColorCorrection","Contrast"})
+    local G = Tab:AddLeftGroupbox("ColorGrading")
+    bindToggle(G, "KH_ColorGrading_Enabled_109", "Color Grading", {"ColorGrading","Enabled"})
+    bindDropdown(G, "KH_ColorGrading_TonemapperPreset_110", "Preset", {"Default","Retro"}, false, {"ColorGrading","TonemapperPreset"})
+    local G = Tab:AddRightGroupbox("Bloom")
+    bindToggle(G, "KH_Bloom_Enabled_111", "Bloom", {"Bloom","Enabled"})
+    bindSlider(G, "KH_Bloom_Intensity_112", "Intensity", 0.0, 1.0, 2, {"Bloom","Intensity"})
+    bindSlider(G, "KH_Bloom_Size_113", "Size", 0.0, 56.0, 0, {"Bloom","Size"})
+    bindSlider(G, "KH_Bloom_Threshold_114", "Threshold", 0.0, 5.0, 2, {"Bloom","Threshold"})
+    local G = Tab:AddLeftGroupbox("SunRays")
+    bindToggle(G, "KH_SunRays_Enabled_115", "Sun Rays", {"SunRays","Enabled"})
+    bindSlider(G, "KH_SunRays_Intensity_116", "Intensity", 0.0, 1.0, 2, {"SunRays","Intensity"})
+    bindSlider(G, "KH_SunRays_Spread_117", "Spread", 0.0, 1.0, 2, {"SunRays","Spread"})
+    local G = Tab:AddRightGroupbox("DepthOfField")
+    bindToggle(G, "KH_DepthOfField_Enabled_118", "Depth of Field", {"DepthOfField","Enabled"})
+    bindSlider(G, "KH_DepthOfField_FarIntensity_119", "Far Intensity", 0.0, 1.0, 2, {"DepthOfField","FarIntensity"})
+    bindSlider(G, "KH_DepthOfField_FocusDistance_120", "Focus Distance", 0.0, 1000.0, 0, {"DepthOfField","FocusDistance"})
+    bindSlider(G, "KH_DepthOfField_InFocusRadius_121", "In Focus Radius", 0.0, 500.0, 0, {"DepthOfField","InFocusRadius"})
+    bindSlider(G, "KH_DepthOfField_NearIntensity_122", "Near Intensity", 0.0, 1.0, 2, {"DepthOfField","NearIntensity"})
+    local G = Tab:AddLeftGroupbox("MotionBlur")
+    bindToggle(G, "KH_MotionBlur_Enabled_123", "Motion Blur", {"MotionBlur","Enabled"})
+    bindSlider(G, "KH_MotionBlur_Intensity_124", "Intensity", 0.0, 56.0, 2, {"MotionBlur","Intensity"})
+    bindSlider(G, "KH_MotionBlur_Sensitivity_125", "Sensitivity", 0.0, 5.0, 2, {"MotionBlur","Sensitivity"})
+    local G = Tab:AddRightGroupbox("StretchedResolution")
+    bindToggle(G, "KH_StretchedResolution_Enabled_126", "Enable Stretched Resolution", {"StretchedResolution","Enabled"})
+    bindSlider(G, "KH_StretchedResolution_X_127", "X Scale", 0.01, 1.0, 2, {"StretchedResolution","X"})
+    bindSlider(G, "KH_StretchedResolution_Y_128", "Y Scale", 0.01, 1.0, 2, {"StretchedResolution","Y"})
+end
+
+-- =============== Tab: esp ===============
+do
+    local Tab = Window:AddTab("esp")
+    local G = Tab:AddLeftGroupbox("Chams")
+    bindToggle(G, "KH_Chams_Enabled_129", "Enable Character Chams", {"Chams","Character","Enabled"})
+    bindColor(G, "KH_Chams_Color_130", "Color", {"Chams","Character","Color"})
+    bindDropdown(G, "KH_Chams_Material_131", "Character Chams Material", {"Default"}, false, {"Chams","Character","Material"})
+    bindToggle(G, "KH_Chams_StripTextures_132", "Strip Character Chams Textures", {"Chams","Character","StripTextures"})
+    bindToggle(G, "KH_Chams_Enabled_133", "Enabled", {"Chams","Enabled"})
+    bindColor(G, "KH_Chams_Color_134", "Color", {"Chams","Color"})
+    bindDropdown(G, "KH_Chams_Material_135", "Material", {"Default"}, false, {"Chams","Material"})
+    bindToggle(G, "KH_Chams_StripTextures_136", "Strip ", {"Chams","StripTextures"})
+    local G = Tab:AddRightGroupbox("ViewModelHighlight")
+    bindToggle(G, "KH_ViewModelHighlight_Enabled_137", "Enabled", {"ViewModelHighlight","Enabled"})
+    bindColor(G, "KH_ViewModelHighlight_FillColor_138", "FillColor", {"ViewModelHighlight","FillColor"})
+    bindToggle(G, "KH_ViewModelHighlight_AlwaysOnTop_139", "AlwaysOnTop", {"ViewModelHighlight","AlwaysOnTop"})
+    bindSlider(G, "KH_ViewModelHighlight_FillTransparency_140", "FillTransparency", -10.0, 10.0, 2, {"ViewModelHighlight","FillTransparency"})
+    bindColor(G, "KH_ViewModelHighlight_OutlineColor_141", "OutlineColor", {"ViewModelHighlight","OutlineColor"})
+    bindSlider(G, "KH_ViewModelHighlight_OutlineTransparency_142", "OutlineTransparency", -10.0, 10.0, 2, {"ViewModelHighlight","OutlineTransparency"})
+    local G = Tab:AddLeftGroupbox("PlayerHit")
+    bindToggle(G, "KH_PlayerHit_Enabled_143", "Enable Hit Feedback", {"PlayerHit","Enabled"})
+    bindToggle(G, "KH_PlayerHit_Enabled_144", "Play Hit Sound", {"PlayerHit","Sound","Enabled"})
+    bindDropdown(G, "KH_PlayerHit_HeadName_145", "Headshot Sound", {"Default"}, false, {"PlayerHit","Sound","HeadName"})
+    bindSlider(G, "KH_PlayerHit_HeadVolume_146", "Headshot Volume", 0.1, 10.0, 1, {"PlayerHit","Sound","HeadVolume"})
+    bindSlider(G, "KH_PlayerHit_HeadPitch_147", "Headshot Pitch", 0.1, 3.0, 1, {"PlayerHit","Sound","HeadPitch"})
+    bindDropdown(G, "KH_PlayerHit_BodyName_148", "Body Hit Sound", {"Default"}, false, {"PlayerHit","Sound","BodyName"})
+    bindSlider(G, "KH_PlayerHit_BodyVolume_149", "Body Hit Volume", 0.1, 10.0, 1, {"PlayerHit","Sound","BodyVolume"})
+    bindSlider(G, "KH_PlayerHit_BodyPitch_150", "Body Hit Pitch", 0.1, 3.0, 1, {"PlayerHit","Sound","BodyPitch"})
+    bindToggle(G, "KH_PlayerHit_DisableGameSound_151", "Mute Game Hit Sound", {"PlayerHit","Sound","DisableGameSound"})
+    bindToggle(G, "KH_PlayerHit_Enabled_152", "Enable Hit Chams", {"PlayerHit","Chams","Enabled"})
+    bindColor(G, "KH_PlayerHit_Color_153", "Color", {"PlayerHit","Chams","Color"})
+    bindSlider(G, "KH_PlayerHit_Duration_154", "Hit Chams Duration", 0.1, 3.0, 1, {"PlayerHit","Chams","Duration"})
+    bindDropdown(G, "KH_PlayerHit_Material_155", "Hit Chams Material", {"Default"}, false, {"PlayerHit","Chams","Material"})
+    bindToggle(G, "KH_PlayerHit_Enabled_156", "Enable Hit Flash", {"PlayerHit","HitFlash","Enabled"})
+    bindColor(G, "KH_PlayerHit_Color_157", "Color", {"PlayerHit","HitFlash","Color"})
+    bindSlider(G, "KH_PlayerHit_Duration_158", "Hit Flash Duration", 0.1, 3.0, 1, {"PlayerHit","HitFlash","Duration"})
+    bindToggle(G, "KH_PlayerHit_Enabled_159", "Enable Hit Notification", {"PlayerHit","Notification","Enabled"})
+    bindInput(G, "KH_PlayerHit_Text_160", "Hit Notification Text", {"PlayerHit","Notification","Text"})
+    bindToggle(G, "KH_PlayerHit_Enabled_161", "Enable Hit Feedback", {"PlayerHit","Enabled"})
+    bindToggle(G, "KH_PlayerHit_Enabled_162", "Play Hit Sound", {"PlayerHit","Sound","Enabled"})
+    bindDropdown(G, "KH_PlayerHit_HeadName_163", "Sound", {"Default"}, false, {"PlayerHit","Sound","HeadName"})
+    bindSlider(G, "KH_PlayerHit_HeadVolume_164", "Volume", 0.1, 10.0, 1, {"PlayerHit","Sound","HeadVolume"})
+    bindSlider(G, "KH_PlayerHit_HeadPitch_165", "Pitch", 0.1, 3.0, 1, {"PlayerHit","Sound","HeadPitch"})
+    bindDropdown(G, "KH_PlayerHit_BodyName_166", "Sound", {"Default"}, false, {"PlayerHit","Sound","BodyName"})
+    bindSlider(G, "KH_PlayerHit_BodyVolume_167", "Volume", 0.1, 10.0, 1, {"PlayerHit","Sound","BodyVolume"})
+    bindSlider(G, "KH_PlayerHit_BodyPitch_168", "Pitch", 0.1, 3.0, 1, {"PlayerHit","Sound","BodyPitch"})
+    bindToggle(G, "KH_PlayerHit_DisableGameSound_169", "Mute Game Hit Sound", {"PlayerHit","Sound","DisableGameSound"})
+    bindToggle(G, "KH_PlayerHit_Enabled_170", "Enable Hit Chams", {"PlayerHit","Chams","Enabled"})
+    bindColor(G, "KH_PlayerHit_Color_171", "Color / Transparency", {"PlayerHit","Chams","Color"})
+    bindSlider(G, "KH_PlayerHit_Duration_172", "Duration", 0.1, 3.0, 1, {"PlayerHit","Chams","Duration"})
+    bindToggle(G, "KH_PlayerHit_Enabled_173", "Enable Hit Flash", {"PlayerHit","HitFlash","Enabled"})
+    bindColor(G, "KH_PlayerHit_Color_174", "Color", {"PlayerHit","HitFlash","Color"})
+    bindSlider(G, "KH_PlayerHit_Duration_175", "Duration", 0.1, 3.0, 1, {"PlayerHit","HitFlash","Duration"})
+    bindToggle(G, "KH_PlayerHit_Enabled_176", "Enable Hit Notification", {"PlayerHit","Notification","Enabled"})
+    bindInput(G, "KH_PlayerHit_Text_177", "Text", {"PlayerHit","Notification","Text"})
+    local G = Tab:AddRightGroupbox("PlayerElimination")
+    bindToggle(G, "KH_PlayerElimination_Enabled_178", "Enable Elimination Feedback", {"PlayerElimination","Enabled"})
+    bindToggle(G, "KH_PlayerElimination_Enabled_179", "Play Elimination Sound", {"PlayerElimination","Sound","Enabled"})
+    bindDropdown(G, "KH_PlayerElimination_Name_180", "Elimination Sound", {"Default"}, false, {"PlayerElimination","Sound","Name"})
+    bindSlider(G, "KH_PlayerElimination_Volume_181", "Elimination Volume", 0.1, 10.0, 1, {"PlayerElimination","Sound","Volume"})
+    bindSlider(G, "KH_PlayerElimination_Pitch_182", "Elimination Pitch", 0.1, 3.0, 1, {"PlayerElimination","Sound","Pitch"})
+    bindToggle(G, "KH_PlayerElimination_Enabled_183", "Enable Elimination Chams", {"PlayerElimination","Chams","Enabled"})
+    bindColor(G, "KH_PlayerElimination_Color_184", "Color", {"PlayerElimination","Chams","Color"})
+    bindSlider(G, "KH_PlayerElimination_Duration_185", "Elimination Chams Duration", 0.1, 3.0, 1, {"PlayerElimination","Chams","Duration"})
+    bindDropdown(G, "KH_PlayerElimination_Material_186", "Elimination Chams Material", {"Default"}, false, {"PlayerElimination","Chams","Material"})
+    bindToggle(G, "KH_PlayerElimination_Enabled_187", "Enable Elimination Flash", {"PlayerElimination","KillFlash","Enabled"})
+    bindColor(G, "KH_PlayerElimination_Color_188", "Color", {"PlayerElimination","KillFlash","Color"})
+    bindSlider(G, "KH_PlayerElimination_Duration_189", "Elimination Flash Duration", 0.1, 3.0, 1, {"PlayerElimination","KillFlash","Duration"})
+    bindToggle(G, "KH_PlayerElimination_Enabled_190", "Enable Elimination Notification", {"PlayerElimination","Notification","Enabled"})
+    bindInput(G, "KH_PlayerElimination_Text_191", "Elimination Notification Text", {"PlayerElimination","Notification","Text"})
+    bindToggle(G, "KH_PlayerElimination_Enabled_192", "Enable Elimination Feedback", {"PlayerElimination","Enabled"})
+    bindToggle(G, "KH_PlayerElimination_Enabled_193", "Play Elimination Sound", {"PlayerElimination","Sound","Enabled"})
+    bindDropdown(G, "KH_PlayerElimination_Name_194", "Sound", {"Default"}, false, {"PlayerElimination","Sound","Name"})
+    bindSlider(G, "KH_PlayerElimination_Volume_195", "Volume", 0.1, 10.0, 1, {"PlayerElimination","Sound","Volume"})
+    bindSlider(G, "KH_PlayerElimination_Pitch_196", "Pitch", 0.1, 3.0, 1, {"PlayerElimination","Sound","Pitch"})
+    bindToggle(G, "KH_PlayerElimination_Enabled_197", "Enable Elimination Chams", {"PlayerElimination","Chams","Enabled"})
+    bindColor(G, "KH_PlayerElimination_Color_198", "Color / Transparency", {"PlayerElimination","Chams","Color"})
+    bindSlider(G, "KH_PlayerElimination_Duration_199", "Duration", 0.1, 3.0, 1, {"PlayerElimination","Chams","Duration"})
+    bindToggle(G, "KH_PlayerElimination_Enabled_200", "Enable Elimination Flash", {"PlayerElimination","KillFlash","Enabled"})
+    bindColor(G, "KH_PlayerElimination_Color_201", "Color", {"PlayerElimination","KillFlash","Color"})
+    bindSlider(G, "KH_PlayerElimination_Duration_202", "Duration", 0.1, 3.0, 1, {"PlayerElimination","KillFlash","Duration"})
+    bindToggle(G, "KH_PlayerElimination_Enabled_203", "Enable Elimination Notification", {"PlayerElimination","Notification","Enabled"})
+    bindInput(G, "KH_PlayerElimination_Text_204", "Text", {"PlayerElimination","Notification","Text"})
+    local G = Tab:AddLeftGroupbox("BulletTracers")
+    bindToggle(G, "KH_BulletTracers_Enabled_205", "Enable Bullet Tracers", {"BulletTracers","Enabled"})
+    bindDropdown(G, "KH_BulletTracers_Style_206", "Tracer Style", {"Default"}, false, {"BulletTracers","Style"})
+    bindSlider(G, "KH_BulletTracers_Width_207", "Tracer Width", 0.02, 0.5, 2, {"BulletTracers","Width"})
+    bindSlider(G, "KH_BulletTracers_TextureLength_208", "Texture Length", 0.5, 20.0, 1, {"BulletTracers","TextureLength"})
+    bindSlider(G, "KH_BulletTracers_TextureSpeed_209", "Texture Speed", 0.0, 10.0, 1, {"BulletTracers","TextureSpeed"})
+    bindSlider(G, "KH_BulletTracers_Lifetime_210", "Tracer Lifetime", 0.1, 5.0, 1, {"BulletTracers","Lifetime"})
+    bindSlider(G, "KH_BulletTracers_FadeTime_211", "Fade Time", 0.0, 5.0, 1, {"BulletTracers","FadeTime"})
+    bindSlider(G, "KH_BulletTracers_Emission_212", "Emission", 0.0, 1.0, 2, {"BulletTracers","Emission"})
+    bindSlider(G, "KH_BulletTracers_Glow_213", "Glow", 1.0, 25.0, 0, {"BulletTracers","Glow"})
+    bindToggle(G, "KH_BulletTracers_Expand_214", "Expand Tracers", {"BulletTracers","Expand"})
+    bindSlider(G, "KH_BulletTracers_ExpandSpeed_215", "Expand Speed", 1.0, 60.0, 0, {"BulletTracers","ExpandSpeed"})
+    bindSlider(G, "KH_BulletTracers_ExpandDamper_216", "Expand Damper", 0.1, 1.0, 2, {"BulletTracers","ExpandDamper"})
+    local G = Tab:AddRightGroupbox("SoundVisualizer")
+    bindDropdown(G, "KH_SoundVisualizer_Mode_217", "Mode", {"Circle","Origin"}, false, {"SoundVisualizer","Mode"})
+    bindToggle(G, "KH_SoundVisualizer_UseLoudnessColor_218", "UseLoudnessColor", {"SoundVisualizer","UseLoudnessColor"})
+    bindToggle(G, "KH_SoundVisualizer_Enabled_219", "Enable Sound ESP", {"SoundVisualizer","Enabled"})
+    bindDropdown(G, "KH_SoundVisualizer_Source_220", "Sound Source", {"All","Enemies","Team","Self"}, false, {"SoundVisualizer","Source"})
+    bindDropdown(G, "KH_SoundVisualizer_Types_221", "Sound Types", {"Footsteps","Other"}, true, {"SoundVisualizer","Types"})
+    bindSlider(G, "KH_SoundVisualizer_MinVolume_222", "Minimum Volume", 0.0, 1.0, 2, {"SoundVisualizer","MinVolume"})
+end
+
+-- =============== Tab: visuals ===============
+do
+    local Tab = Window:AddTab("visuals")
+    local G = Tab:AddLeftGroupbox("CustomCrosshair")
+    bindSlider(G, "KH_CustomCrosshair_Size_223", "Crosshair Image Size", 8.0, 256.0, 0, {"CustomCrosshair","Image","Size"})
+    bindSlider(G, "KH_CustomCrosshair_Transparency_224", "Crosshair Image Transparency", 0.0, 1.0, 2, {"CustomCrosshair","Image","Transparency"})
+    bindToggle(G, "KH_CustomCrosshair_Enabled_225", "Enabled", {"CustomCrosshair","Enabled"})
+    bindSlider(G, "KH_CustomCrosshair_Length_226", "Line Length", 1.0, 100.0, 0, {"CustomCrosshair","Length"})
+    bindSlider(G, "KH_CustomCrosshair_Thickness_227", "Line Thickness", 1.0, 20.0, 0, {"CustomCrosshair","Thickness"})
+    bindSlider(G, "KH_CustomCrosshair_Gap_228", "Line Gap", 0.0, 100.0, 0, {"CustomCrosshair","Gap"})
+    bindToggle(G, "KH_CustomCrosshair_Enabled_229", "Crosshair Outline", {"CustomCrosshair","Outline","Enabled"})
+    bindColor(G, "KH_CustomCrosshair_Color_230", "Color", {"CustomCrosshair","Outline","Color"})
+    bindSlider(G, "KH_CustomCrosshair_Thickness_231", "Crosshair Outline Thickness", 0.0, 10.0, 0, {"CustomCrosshair","Outline","Thickness"})
+    bindToggle(G, "KH_CustomCrosshair_Enabled_232", "Enable Crosshair", {"CustomCrosshair","Enabled"})
+    bindDropdown(G, "KH_CustomCrosshair_Style_233", "Crosshair Style", {"Lines","Image"}, false, {"CustomCrosshair","Style"})
+    bindToggle(G, "KH_CustomCrosshair_Enabled_234", "Follow Target", {"CustomCrosshair","FollowTarget","Enabled"})
+    bindDropdown(G, "KH_CustomCrosshair_Mode_235", "Follow Target Mode", {"Crosshair","Crosshair + Text"}, false, {"CustomCrosshair","FollowTarget","Mode"})
+    bindSlider(G, "KH_CustomCrosshair_Speed_236", "Follow Speed", 1.0, 50.0, 0, {"CustomCrosshair","FollowTarget","Speed"})
+    bindSlider(G, "KH_CustomCrosshair_Damper_237", "Follow Damper", 0.0, 30.0, 0, {"CustomCrosshair","FollowTarget","Damper"})
+    bindSlider(G, "KH_CustomCrosshair_SnapDistance_238", "Snap Distance", 0.0, 10.0, 0, {"CustomCrosshair","FollowTarget","SnapDistance"})
+    bindToggle(G, "KH_CustomCrosshair_Enabled_239", "Rotate Crosshair", {"CustomCrosshair","Rotation","Enabled"})
+    bindSlider(G, "KH_CustomCrosshair_Speed_240", "Crosshair Rotation Speed", 0.0, 720.0, 0, {"CustomCrosshair","Rotation","Speed"})
+    bindToggle(G, "KH_CustomCrosshair_Enabled_241", "Crosshair Spread", {"CustomCrosshair","Spread","Enabled"})
+    bindRangeSlider(G, "KH_CustomCrosshair_Range_242", "Crosshair Spread Range", 0.0, 100.0, {"CustomCrosshair","Spread","Range"})
+    bindSlider(G, "KH_CustomCrosshair_Speed_243", "Spread Speed", 0.0, 20.0, 1, {"CustomCrosshair","Spread","Speed"})
+    bindSlider(G, "KH_CustomCrosshair_Angle_244", "Rotation", 0.0, 360.0, 0, {"CustomCrosshair","Rotation","Angle"})
+    bindInput(G, "KH_CustomCrosshair_Content_245", "Crosshair Text Content", {"CustomCrosshair","Text","Content"})
+    bindDropdown(G, "KH_CustomCrosshair_Font_246", "Crosshair Text Font", {"Default"}, false, {"CustomCrosshair","Text","Font"})
+    bindSlider(G, "KH_CustomCrosshair_Size_247", "Crosshair Text Size", 6.0, 48.0, 0, {"CustomCrosshair","Text","Size"})
+    bindSlider(G, "KH_CustomCrosshair_Offset_248", "Crosshair Text Offset", 0.0, 100.0, 0, {"CustomCrosshair","Text","Offset"})
+    bindColor(G, "KH_CustomCrosshair_Color_249", "Crosshair Text Color", {"CustomCrosshair","Text","Color"})
+    bindToggle(G, "KH_CustomCrosshair_Enabled_250", "Crosshair Text Outline", {"CustomCrosshair","Text","Outline","Enabled"})
+    bindColor(G, "KH_CustomCrosshair_Color_251", "Color", {"CustomCrosshair","Text","Outline","Color"})
+    bindSlider(G, "KH_CustomCrosshair_Thickness_252", "Crosshair Text Outline Thickness", 0.0, 10.0, 0, {"CustomCrosshair","Text","Outline","Thickness"})
+    bindToggle(G, "KH_CustomCrosshair_Enabled_253", "Enable Crosshair Text", {"CustomCrosshair","Text","Enabled"})
+    local G = Tab:AddRightGroupbox("Removables")
+    bindToggle(G, "KH_Removables_NoFlashbang_254", "Hide Flashbang Effect", {"Removables","NoFlashbang"})
+    bindToggle(G, "KH_Removables_NoBurnEffect_255", "Hide Burn Effect", {"Removables","NoBurnEffect"})
+    bindToggle(G, "KH_Removables_NoAdsVignette_256", "Hide ADS Vignette", {"Removables","NoAdsVignette"})
+    bindToggle(G, "KH_Removables_NoScopeOverlay_257", "Hide Scope Overlay", {"Removables","NoScopeOverlay"})
+    bindToggle(G, "KH_Removables_NoScopeReticle_258", "Hide Scope Reticle", {"Removables","NoScopeReticle"})
+    bindToggle(G, "KH_Removables_NoHitmarker_259", "Hide Hitmarker", {"Removables","NoHitmarker"})
+    bindToggle(G, "KH_Removables_NoMuzzleFlash_260", "Hide Muzzle Flash", {"Removables","NoMuzzleFlash"})
+    bindToggle(G, "KH_Removables_NoGunTracers_261", "Hide Game Tracers", {"Removables","NoGunTracers"})
+    local G = Tab:AddLeftGroupbox("ViewModelOffset")
+    bindToggle(G, "KH_ViewModelOffset_Enabled_262", "Enable Viewmodel Position", {"ViewModelOffset","Enabled"})
+    bindSlider(G, "KH_ViewModelOffset_X_263", "X", -7.5, 7.5, 2, {"ViewModelOffset","X"})
+    bindSlider(G, "KH_ViewModelOffset_Y_264", "Y", -7.5, 7.5, 2, {"ViewModelOffset","Y"})
+    bindSlider(G, "KH_ViewModelOffset_Z_265", "Z", -7.5, 7.5, 2, {"ViewModelOffset","Z"})
+    bindSlider(G, "KH_ViewModelOffset_Pitch_266", "Pitch", -180.0, 180.0, 0, {"ViewModelOffset","Pitch"})
+    bindSlider(G, "KH_ViewModelOffset_Yaw_267", "Yaw", -180.0, 180.0, 0, {"ViewModelOffset","Yaw"})
+    bindSlider(G, "KH_ViewModelOffset_Roll_268", "Roll", -180.0, 180.0, 0, {"ViewModelOffset","Roll"})
+    local G = Tab:AddRightGroupbox("ViewModelWireframe")
+    bindToggle(G, "KH_ViewModelWireframe_Enabled_269", "Enabled", {"ViewModelWireframe","Enabled"})
+    bindColor(G, "KH_ViewModelWireframe_Color_270", "Color", {"ViewModelWireframe","Color"})
+    bindSlider(G, "KH_ViewModelWireframe_Width_271", "Width", 0.001, 0.02, 0, {"ViewModelWireframe","Width"})
+    local G = Tab:AddLeftGroupbox("CameraFov")
+    bindToggle(G, "KH_CameraFov_Enabled_272", "Enable Camera FOV", {"CameraFov","Enabled"})
+    bindSlider(G, "KH_CameraFov_Value_273", "Field of View", 30.0, 120.0, 0, {"CameraFov","Value"})
+    local G = Tab:AddRightGroupbox("ThirdPerson")
+    bindToggle(G, "KH_ThirdPerson_RayCheck_274", "Ray Check", {"ThirdPerson","RayCheck"})
+    bindToggle(G, "KH_ThirdPerson_ShowReplica_275", "Show Replica", {"ThirdPerson","ShowReplica"})
+    bindSlider(G, "KH_ThirdPerson_X_276", "X Offset", -15.0, 15.0, 1, {"ThirdPerson","X"})
+    bindSlider(G, "KH_ThirdPerson_Y_277", "Y Offset", -5.0, 10.0, 1, {"ThirdPerson","Y"})
+    bindSlider(G, "KH_ThirdPerson_Z_278", "Z Offset", 0.0, 15.0, 1, {"ThirdPerson","Z"})
+end
+
+-- =============== Tab: character ===============
+do
+    local Tab = Window:AddTab("character")
+    local G = Tab:AddLeftGroupbox("Movement")
+    bindSlider(G, "KH_Movement_Speed_279", "Speed", 0, 100, 0, {"Movement","Speed"})
+    bindDropdown(G, "KH_Movement_Mode_280", "Mode", {"Under Feet","Camera Look"}, false, {"Movement","LongJump","Mode"})
+    bindSlider(G, "KH_Movement_Force_281", "Force", 0.0, 300.0, 0, {"Movement","LongJump","Force"})
+    bindSlider(G, "KH_Movement_UpwardVelocity_282", "Upward Velocity", 0.0, 200.0, 0, {"Movement","LongJump","UpwardVelocity"})
+    bindSlider(G, "KH_Movement_Behind_283", "Behind Offset", 0.0, 8.0, 1, {"Movement","LongJump","Behind"})
+    bindToggle(G, "KH_Movement_Enabled_284", "Enable Movement Recorder", {"Movement","MovementRecorder","Enabled"})
+    bindToggle(G, "KH_Movement_HideUI_285", "Hide Recorder UI", {"Movement","MovementRecorder","HideUI"})
+    bindToggle(G, "KH_Movement_HideNotifications_286", "Hide Recorder Notifications", {"Movement","MovementRecorder","HideNotifications"})
+    bindSlider(G, "KH_Movement_OpenDistance_287", "Open Distance", 1.0, 25.0, 1, {"Movement","MovementRecorder","OpenDistance"})
+    bindSlider(G, "KH_Movement_RenderDistance_288", "Render Distance", 10.0, 250.0, 0, {"Movement","MovementRecorder","RenderDistance"})
+    bindSlider(G, "KH_Movement_LookAlignSpeed_289", "Look Align Speed", 45.0, 720.0, 0, {"Movement","MovementRecorder","LookAlignSpeed"})
+    bindSlider(G, "KH_Movement_LookSmoothing_290", "Look Smoothness", 0.0, 100.0, 0, {"Movement","MovementRecorder","LookSmoothing"})
+    bindSlider(G, "KH_Movement_AlignSnapDistance_291", "Align Snap Distance", 0.1, 5.0, 1, {"Movement","MovementRecorder","AlignSnapDistance"})
+    local G = Tab:AddRightGroupbox("AnimationPlayer")
+    bindToggle(G, "KH_AnimationPlayer_Enabled_292", "Enable Animation Player", {"AnimationPlayer","Enabled"})
+    bindDropdown(G, "KH_AnimationPlayer_Animation_293", "Animation", {"Default"}, false, {"AnimationPlayer","Animation"})
+    bindInput(G, "KH_AnimationPlayer_CustomId_294", "Custom Animation ID", {"AnimationPlayer","CustomId"})
+    bindSlider(G, "KH_AnimationPlayer_Speed_295", "Speed", 0.0, 5.0, 2, {"AnimationPlayer","Speed"})
+    bindSlider(G, "KH_AnimationPlayer_Start_296", "Start", 0.0, 100.0, 0, {"AnimationPlayer","Start"})
+    bindSlider(G, "KH_AnimationPlayer_End_297", "End", 0.0, 100.0, 0, {"AnimationPlayer","End"})
+    local G = Tab:AddLeftGroupbox("HitboxPoint")
+    bindDropdown(G, "KH_HitboxPoint_Type_298", "Aim Point", {"Center","Surface"}, false, {"HitboxPoint","Type"})
+    bindSlider(G, "KH_HitboxPoint_SizeReductionPercentage_299", "Surface Reduction (%)", 0.0, 100.0, 2, {"HitboxPoint","Surface","SizeReductionPercentage"})
+    bindToggle(G, "KH_HitboxPoint_PreserveDepth_300", "Preserve Depth", {"HitboxPoint","Surface","PreserveDepth"})
+    local G = Tab:AddRightGroupbox("HitboxSelection")
+    bindDropdown(G, "KH_HitboxSelection_Type_301", "Hitbox Selection", {"ClosestToCrosshair","Random"}, false, {"HitboxSelection","Type"})
+    bindSlider(G, "KH_HitboxSelection_Random_302", "Random", 0.0, 100.0, 0, {"HitboxSelection","Random"})
+    local G = Tab:AddLeftGroupbox("ItemModifiers")
+    bindToggle(G, "KH_ItemModifiers_Enabled_303", "Enabled", {"ItemModifiers","Enabled"})
+    bindSlider(G, "KH_ItemModifiers_Percentage_304", "Percentage", 0, 100, 0, {"ItemModifiers","Percentage"})
+    bindToggle(G, "KH_ItemModifiers_NoSpread_305", "Remove Spread", {"ItemModifiers","NoSpread"})
+    bindToggle(G, "KH_ItemModifiers_AutomaticWeapon_306", "Automatic Fire", {"ItemModifiers","AutomaticWeapon"})
+    bindToggle(G, "KH_ItemModifiers_AlwaysBackstab_307", "Always Backstab", {"ItemModifiers","AlwaysBackstab"})
+    bindToggle(G, "KH_ItemModifiers_Enabled_308", "Extend Melee Range", {"ItemModifiers","ExtendMeleeRange","Enabled"})
+    bindSlider(G, "KH_ItemModifiers_Range_309", "Range", 5.0, 20.0, 0, {"ItemModifiers","ExtendMeleeRange","Range"})
+    bindToggle(G, "KH_ItemModifiers_Enabled_310", "Fuse Override", {"ItemModifiers","GrenadeFuse","Enabled"})
+    bindDropdown(G, "KH_ItemModifiers_ExplodeOn_311", "Explode On", {"Impact","Throw"}, false, {"ItemModifiers","GrenadeFuse","ExplodeOn"})
+    bindToggle(G, "KH_ItemModifiers_RemoveFuse_312", "Remove Fuse", {"ItemModifiers","GrenadeFuse","RemoveFuse"})
+    bindToggle(G, "KH_ItemModifiers_InfiniteDoubleJumps_313", "Infinite Double Jumps", {"ItemModifiers","InfiniteDoubleJumps"})
+    bindToggle(G, "KH_ItemModifiers_NoShootAnimation_314", "Hide Shoot Animation", {"ItemModifiers","NoShootAnimation"})
+    bindToggle(G, "KH_ItemModifiers_NoSprintAnimation_315", "Hide Sprint Animation", {"ItemModifiers","NoSprintAnimation"})
+    bindToggle(G, "KH_ItemModifiers_NoEquipAnimation_316", "Hide Equip Animation", {"ItemModifiers","NoEquipAnimation"})
+    bindToggle(G, "KH_ItemModifiers_NoReloadAnimation_317", "Hide Reload Animation", {"ItemModifiers","NoReloadAnimation"})
+    bindToggle(G, "KH_ItemModifiers_NoMotion_318", "Remove Weapon Motion", {"ItemModifiers","NoMotion"})
+    bindToggle(G, "KH_ItemModifiers_NoCameraShake_319", "Remove Camera Shake", {"ItemModifiers","NoCameraShake"})
+    bindToggle(G, "KH_ItemModifiers_NoCameraSway_320", "Remove Camera Sway", {"ItemModifiers","NoCameraSway"})
+end
+
+-- =============== Tab: misc ===============
+do
+    local Tab = Window:AddTab("misc")
+    local G = Tab:AddLeftGroupbox("AutoLoadout")
+    bindToggle(G, "KH_AutoLoadout_Enabled_321", "Enabled", {"AutoLoadout","Enabled"})
+    bindToggle(G, "KH_AutoLoadout_PerMap_322", "Use Map-Specific Loadouts", {"AutoLoadout","PerMap"})
+    bindToggle(G, "KH_AutoLoadout_MultipleLoadouts_323", "Use Fallback Loadouts", {"AutoLoadout","MultipleLoadouts"})
+    local G = Tab:AddRightGroupbox("AutoBan")
+    bindToggle(G, "KH_AutoBan_Enabled_324", "Enabled", {"AutoBan","Enabled"})
+    bindDropdown(G, "KH_AutoBan_FirstWeapons_325", "First Ban Choices", {"Default"}, true, {"AutoBan","FirstWeapons"})
+    bindDropdown(G, "KH_AutoBan_SecondWeapons_326", "Second Ban Choices", {"Default"}, true, {"AutoBan","SecondWeapons"})
+    local G = Tab:AddLeftGroupbox("AutoVote")
+    bindToggle(G, "KH_AutoVote_Enabled_327", "Enabled", {"AutoVote","Enabled"})
+    bindDropdown(G, "KH_AutoVote_Maps_328", "Maps to Vote For", {"Default"}, true, {"AutoVote","Maps"})
+    local G = Tab:AddRightGroupbox("AutoQueue")
+    bindToggle(G, "KH_AutoQueue_Enabled_329", "Enabled", {"AutoQueue","Enabled"})
+    bindDropdown(G, "KH_AutoQueue_Queue_330", "Queue", {"Default"}, false, {"AutoQueue","Queue"})
+    local G = Tab:AddLeftGroupbox("AutoRespawn")
+    bindToggle(G, "KH_AutoRespawn_Enabled_331", "Enabled", {"AutoRespawn","Enabled"})
+    local G = Tab:AddRightGroupbox("AutoPickupDrops")
+    bindToggle(G, "KH_AutoPickupDrops_Enabled_332", "Enabled", {"AutoPickupDrops","Enabled"})
+    bindDropdown(G, "KH_AutoPickupDrops_Types_333", "Pickup Types", {"Ammo","Health"}, true, {"AutoPickupDrops","Types"})
+    local G = Tab:AddLeftGroupbox("AntiKatana")
+    bindToggle(G, "KH_AntiKatana_Enabled_334", "Enabled", {"AntiKatana","Enabled"})
+    local G = Tab:AddRightGroupbox("SubspaceTripmines")
+    bindToggle(G, "KH_SubspaceTripmines_AutoTrigger_335", "Auto Trigger", {"SubspaceTripmines","AutoTrigger"})
+    bindToggle(G, "KH_SubspaceTripmines_TeamTrigger_336", "Team Trigger", {"SubspaceTripmines","TeamTrigger"})
+    local G = Tab:AddLeftGroupbox("HackerDetector")
+    bindToggle(G, "KH_HackerDetector_Enabled_337", "Enabled", {"HackerDetector","Enabled"})
+    bindToggle(G, "KH_HackerDetector_Notify_338", "Notify", {"HackerDetector","Notify"})
+    bindColor(G, "KH_HackerDetector_Color_339", "Text Color", {"HackerDetector","Color"})
+    local G = Tab:AddRightGroupbox("ModDetector")
+    bindToggle(G, "KH_ModDetector_Enabled_340", "Enabled", {"ModDetector","Enabled"})
+    bindDropdown(G, "KH_ModDetector_Moderators_341", "Moderator Responses", {"Notify","Kick","ToLobby"}, true, {"ModDetector","Moderators"})
+    bindDropdown(G, "KH_ModDetector_ModFriends_342", "Mod Friends", {"Notify","Kick","ToLobby"}, true, {"ModDetector","ModFriends"})
+    bindColor(G, "KH_ModDetector_Color_343", "Text Color", {"ModDetector","Color"})
+    local G = Tab:AddLeftGroupbox("DeviceSpoof")
+    bindToggle(G, "KH_DeviceSpoof_Enabled_344", "Enable Device Spoof", {"DeviceSpoof","Enabled"})
+    bindDropdown(G, "KH_DeviceSpoof_SpoofType_345", "Presented Platform", {"Default"}, false, {"DeviceSpoof","SpoofType"})
+    local G = Tab:AddRightGroupbox("UserServer")
+    bindToggle(G, "KH_UserServer_ShareSkins_346", "Share Skins", {"UserServer","ShareSkins"})
+    bindToggle(G, "KH_UserServer_ShowActive_347", "Show Active Cosmetics", {"UserServer","ShowActive"})
+end
+
+    pcall(function()
+        if ThemeManager then
+            ThemeManager:SetLibrary(Library)
+            ThemeManager:SetFolder("QuantumObsidian")
+            ThemeManager:ApplyToTab(Window:AddTab("theme"))
+        end
+    end)
+    pcall(function()
+        if SaveManager then
+            SaveManager:SetLibrary(Library)
+            SaveManager:IgnoreThemeSettings()
+            SaveManager:SetFolder("QuantumObsidian")
+            SaveManager:BuildConfigSection(Window:AddTab("settings"))
+        end
+    end)
+
+    pcall(function() if Library.Notify then Library:Notify("UI bridges active", 3) end end)
+
+    UserInputService.InputBegan:Connect(function(input, gpe)
+        if gpe then return end
+        if input.KeyCode == Enum.KeyCode.RightShift then Library:Toggle() end
+    end)
+end)
