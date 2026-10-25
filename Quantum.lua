@@ -14943,20 +14943,18 @@ for _, child in ipairs(coreGuiService:GetChildren()) do
     _G.__QuantumPreKpGuis[child] = true
 end
 
--- Nuclear hide: Instance.new hook so every ScreenGui KP creates is immediately disabled.
--- Store the hook in _G so we can disable it later.
-_G.__QuantumInstanceNew = Instance.new
-local realInstanceNew = Instance.new
-Instance.new = function(className, parent)
-    local inst = realInstanceNew(className, parent)
-    if className == "ScreenGui" then
+-- Instead of hooking Instance.new (Luau makes it readonly), watch CoreGui for
+-- new children and tag any ScreenGui that appears while KP loads.
+_G.__QuantumKpLoading = true
+coreGuiService.ChildAdded:Connect(function(child)
+    if not _G.__QuantumKpLoading then return end
+    if child:IsA("ScreenGui") and not _G.__QuantumPreKpGuis[child] then
         pcall(function()
-            inst.Name = "QuantumKillMe_hooked_" .. tostring(math.random(1, 999999))
-            inst.Enabled = false
+            child.Name = "QuantumKillMe_" .. child.Name
+            child.Enabled = false
         end)
     end
-    return inst
-end
+end)
 
 -- =============================================================================
 -- KiciaHook Premium (patched below with store exposure)
@@ -81616,8 +81614,8 @@ end
 task.spawn(function()
     local Store = waitForKiciaStore(15)
 
-    -- IMPORTANT: unhook Instance.new so Obsidian can create its own ScreenGui normally.
-    pcall(function() Instance.new = _G.__QuantumInstanceNew or Instance.new end)
+    -- Stop the ChildAdded tagger so Obsidian's own ScreenGui isn't disabled.
+    _G.__QuantumKpLoading = false
 
     -- Force KiciaHook ScreenGuis to stay hidden - any ScreenGui in CoreGui that
     -- wasn't there before KP loaded, and isn't ours.
