@@ -16405,6 +16405,18 @@ local function hookRespawn(char)
 end
 if localPlayer.Character then hookRespawn(localPlayer.Character) end
 localPlayer.CharacterAdded:Connect(hookRespawn)
+-- ==============================
+--  Forward declarations for the next IIFE-wrapped section (register budget)
+-- ==============================
+local startNameSpoof, stopNameSpoof, onHwidToggle, randomHwid
+local resetCharacterSkin, applyCharacterSkin, applyWeaponSkin, restoreWeaponSkin, refreshWeaponSkin
+local applyGlowSkin, removeGlowSkin, applyTrailSkin, removeTrailSkin
+local applyWireframeSkin, removeWireframeSkin, startMotionBlur, stopMotionBlur
+local initRivals, rivals, rivalsStatusText, cosmeticHooked, hookRivalsCosmetics
+local flickbotStep, headMarkerStep, headMarkers
+local applyBloom, applySunRays, applyColorGrading
+
+;(function() -- nested IIFE #2 to isolate register budget for spoofer+skin+rivals+kicia
 
 -- ==============================
 --  Spoofer
@@ -16417,7 +16429,7 @@ local spoofState = {
 }
 
 -- Random hex ID generator for HWID.
-local function randomHwid()
+randomHwid = function()
 	local chars = "0123456789abcdef"
 	local out = {}
 	for i = 1, 32 do out[i] = chars:sub(math.random(1, #chars), math.random(1, #chars)) end
@@ -16447,13 +16459,13 @@ local function applyNameSpoofTo(obj)
 	cached.Spoofed = new
 	if cur ~= new then pcall(function() obj.Text = new end) end
 end
-local function startNameSpoof()
+startNameSpoof = function()
 	if spoofState.textConn then return end
 	spoofState.textConn = coreGui.DescendantAdded:Connect(function(d) applyNameSpoofTo(d) end)
 	for _, d in ipairs(coreGui:GetDescendants()) do applyNameSpoofTo(d) end
 	for _, d in ipairs(playersService:GetDescendants()) do applyNameSpoofTo(d) end
 end
-local function stopNameSpoof()
+stopNameSpoof = function()
 	if spoofState.textConn then spoofState.textConn:Disconnect() spoofState.textConn = nil end
 	for obj, cache in pairs(spoofState.textCache) do
 		if obj and obj.Parent and cache.Original then pcall(function() obj.Text = cache.Original end) end
@@ -16520,7 +16532,7 @@ if statsService then
 end
 
 -- Generate a fresh HWID on toggle so the user doesn't need to type one.
-local function onHwidToggle(state)
+onHwidToggle = function(state)
 	if state and vals.SpoofHwid == "" then vals.SpoofHwid = randomHwid() end
 end
 
@@ -16585,7 +16597,7 @@ local function applyDescriptionOverrides(desc)
 end
 
 -- Apply character skin by loading another user's HumanoidDescription.
-local function applyCharacterSkin()
+applyCharacterSkin = function()
 	local char = localPlayer.Character
 	if not char then return end
 	local hum = char:FindFirstChildOfClass("Humanoid")
@@ -16610,7 +16622,7 @@ local function applyCharacterSkin()
 end
 
 -- Reset character to its own appearance.
-local function resetCharacterSkin()
+resetCharacterSkin = function()
 	local char = localPlayer.Character
 	if not char then return end
 	local hum = char:FindFirstChildOfClass("Humanoid")
@@ -16622,7 +16634,7 @@ local function resetCharacterSkin()
 end
 
 -- Weapon skin: swap MeshId/TextureId on the equipped tool's Handle (or SpecialMesh).
-local function applyWeaponSkin(tool)
+applyWeaponSkin = function(tool)
 	if not tool or not tool:IsA("Tool") then return end
 	local handle = tool:FindFirstChild("Handle")
 	if not handle then return end
@@ -16646,7 +16658,7 @@ local function applyWeaponSkin(tool)
 		end
 	end
 end
-local function restoreWeaponSkin()
+restoreWeaponSkin = function()
 	for m, orig in pairs(skinState.origWeaponMesh) do
 		if m and m.Parent then
 			pcall(function() m.MeshId = orig.MeshId end)
@@ -16658,7 +16670,7 @@ local function restoreWeaponSkin()
 	end
 	skinState.origWeaponMesh = {}
 end
-local function refreshWeaponSkin()
+refreshWeaponSkin = function()
 	local char = localPlayer.Character; if not char then return end
 	for _, t in ipairs(char:GetChildren()) do
 		if t:IsA("Tool") then applyWeaponSkin(t) end
@@ -16666,7 +16678,7 @@ local function refreshWeaponSkin()
 end
 
 -- Glow (own-player chams/highlight).
-local function applyGlowSkin()
+applyGlowSkin = function()
 	local char = localPlayer.Character; if not char then return end
 	local hl = char:FindFirstChild("ByteGlowSkin")
 	if not hl then
@@ -16679,14 +16691,14 @@ local function applyGlowSkin()
 	hl.FillTransparency = 0.3
 	hl.DepthMode    = Enum.HighlightDepthMode.AlwaysOnTop
 end
-local function removeGlowSkin()
+removeGlowSkin = function()
 	local char = localPlayer.Character; if not char then return end
 	local hl = char:FindFirstChild("ByteGlowSkin")
 	if hl then hl:Destroy() end
 end
 
 -- Trail (attach a Trail to character's limbs).
-local function applyTrailSkin()
+applyTrailSkin = function()
 	local char = localPlayer.Character; if not char then return end
 	skinState.trails = {}
 	local trailColor = ColorSequence.new(Color3.fromRGB(vals.TrailColorR, vals.TrailColorG, vals.TrailColorB))
@@ -16706,7 +16718,7 @@ local function applyTrailSkin()
 		end
 	end
 end
-local function removeTrailSkin()
+removeTrailSkin = function()
 	for _, t in ipairs(skinState.trails) do
 		pcall(function() t.trail:Destroy() end)
 		pcall(function() t.a0:Destroy() end)
@@ -16720,7 +16732,7 @@ local function removeTrailSkin()
 end
 
 -- Wireframe skin.
-local function applyWireframeSkin()
+applyWireframeSkin = function()
 	local char = localPlayer.Character; if not char then return end
 	skinState.wireParts = {}
 	for _, p in ipairs(char:GetDescendants()) do
@@ -16731,7 +16743,7 @@ local function applyWireframeSkin()
 		end
 	end
 end
-local function removeWireframeSkin()
+removeWireframeSkin = function()
 	for p, orig in pairs(skinState.wireParts) do
 		if p and p.Parent then
 			pcall(function()
@@ -16744,7 +16756,7 @@ end
 
 -- Motion Blur (camera velocity-based blur, from Yabujin).
 local motionBlurState = { blur = nil, strength = 12, lastCFrame = nil, conn = nil }
-local function startMotionBlur()
+startMotionBlur = function()
 	if motionBlurState.blur then return end
 	motionBlurState.blur = Instance.new("BlurEffect")
 	motionBlurState.blur.Size = 0
@@ -16765,7 +16777,7 @@ local function startMotionBlur()
 		motionBlurState.lastCFrame = N
 	end)
 end
-local function stopMotionBlur()
+stopMotionBlur = function()
 	if motionBlurState.conn then motionBlurState.conn:Disconnect() motionBlurState.conn = nil end
 	if motionBlurState.blur then motionBlurState.blur:Destroy() motionBlurState.blur = nil end
 end
@@ -16792,10 +16804,10 @@ if localPlayer.Character then task.spawn(hookCharacterSkins, localPlayer.Charact
 -- ==============================
 --  Rivals (game-specific)
 -- ==============================
-local rivals = { ready = false, utility = nil, enums = nil, fighter = nil, cosmetic = nil }
+rivals = { ready = false, utility = nil, enums = nil, fighter = nil, cosmetic = nil }
 
 -- Lazy-load Rivals modules; detect by presence rather than PlaceId so it fails gracefully elsewhere.
-local function initRivals()
+initRivals = function()
 	if rivals.ready then return true end
 	local rs = replicatedStorage
 	local modulesFolder = rs:FindFirstChild("Modules")
@@ -16925,7 +16937,7 @@ task.spawn(function()
 end)
 
 -- Replace Combat FOV marker label with a status hint.
-local function rivalsStatusText()
+rivalsStatusText = function()
 	return rivals.ready and "Rivals: hooks loaded" or "Rivals: waiting for modules..."
 end
 
@@ -16958,8 +16970,8 @@ runService.Heartbeat:Connect(function()
 end)
 
 -- Skin / Cosmetic Unlocker: hook CosmeticController ownership checks to return true for everything.
-local cosmeticHooked = false
-local function hookRivalsCosmetics()
+cosmeticHooked = false
+hookRivalsCosmetics = function()
 	if cosmeticHooked or not rivals.ready or not rivals.cosmetic then return end
 	cosmeticHooked = true
 	local orig = {}
@@ -17012,7 +17024,7 @@ end)
 -- Flickbot: periodic flick to best target and shoot.
 local flickLastShot = 0
 local flickLastFlick = 0
-local function flickbotStep(now)
+flickbotStep = function(now)
 	if not toggles.Flickbot then return end
 	if now - flickLastFlick < vals.FlickCooldown / 1000 then return end
 	local target = getBestTarget()
@@ -17029,7 +17041,7 @@ local function flickbotStep(now)
 end
 
 -- Head Marker (circle at enemy head).
-local headMarkers = {}
+headMarkers = {}
 local function updateHeadMarkers()
 	for player, _ in pairs(espObjects) do
 		if not headMarkers[player] then
@@ -17040,7 +17052,7 @@ local function updateHeadMarkers()
 		end
 	end
 end
-local function headMarkerStep()
+headMarkerStep = function()
 	if not toggles.HeadMarker then
 		for _, c in pairs(headMarkers) do c.Visible = false end
 		return
@@ -17062,7 +17074,7 @@ end
 
 -- Lighting effects.
 local lightEffects = { bloom = nil, sunRays = nil, colorGrade = nil }
-local function applyBloom(state)
+applyBloom = function(state)
 	if state then
 		if not lightEffects.bloom then
 			lightEffects.bloom = Instance.new("BloomEffect")
@@ -17075,7 +17087,7 @@ local function applyBloom(state)
 		lightEffects.bloom:Destroy(); lightEffects.bloom = nil
 	end
 end
-local function applySunRays(state)
+applySunRays = function(state)
 	if state then
 		if not lightEffects.sunRays then
 			lightEffects.sunRays = Instance.new("SunRaysEffect")
@@ -17086,7 +17098,7 @@ local function applySunRays(state)
 		lightEffects.sunRays:Destroy(); lightEffects.sunRays = nil
 	end
 end
-local function applyColorGrading(state)
+applyColorGrading = function(state)
 	if state then
 		if not lightEffects.colorGrade then
 			lightEffects.colorGrade = Instance.new("ColorCorrectionEffect")
@@ -17105,6 +17117,8 @@ local function applyColorGrading(state)
 		lightEffects.colorGrade:Destroy(); lightEffects.colorGrade = nil
 	end
 end
+
+end)() -- end nested IIFE #2
 
 -- Viewmodel Offset (6-DOF: position X/Y/Z + rotation Pitch/Yaw/Roll).
 local vmOffsetConn
