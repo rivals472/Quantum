@@ -90706,6 +90706,7 @@ end
             N_slider(G, "N_CtrQuantumRadius", "Solix Spot Radius", 5, 100, 0, "CtrQuantumRadius")
         end)
     end)
+end) -- close task.spawn(function() from line 81969
 
 -- =============================================================================
 -- Quantum Rage Counter (user upgrade, 2026-11-03)
