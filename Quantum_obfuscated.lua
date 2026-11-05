@@ -56,20 +56,140 @@ _G.__QuantumLibrary      = Library
 do
     local realCreate = Library.CreateWindow
     local firstWindow = nil
-    local titles = {}
+    local tabNames = {}  -- seen tab labels -> count, for namespace dedup
+
+    -- Rename KH Rebuild native top-level tabs to UE-style lowercase labels.
+    -- Features stay 100% alive (KH built them, we only swap the label).
+    local RENAME = {
+        ["Combat"]     = "main",
+        ["Visuals"]    = "visuals",
+        ["Automation"] = "misc",
+        ["Cosmetics"]  = "cosmetics",
+        ["Player"]     = "character",
+        ["World"]      = "world",
+    }
+    -- Lowercase UE-bridge tabs I wrote earlier are now redundant — the KH
+    -- renames cover them with the real feature UI. Hide them silently.
+    local SUPPRESS = {
+        ["main"]      = true,
+        ["world"]     = true,
+        ["esp"]       = true,
+        ["visuals"]   = true,
+        ["character"] = true,
+        ["misc"]      = true,
+    }
+
+    -- Null tab/widget shim: swallows every chained call so suppressed KH
+    -- code (:Grid, :AddTab, :AddSection, :AddToggle, :AddGear, ...) doesn't
+    -- crash. Every indexed field returns a function that returns the shim
+    -- (and a dummy .Row for widget.gear access).
+    local NullShim
+    NullShim = setmetatable({}, {
+        __index = function(_, k)
+            if k == "Row" then return NullShim end
+            if k == "Value" then return false end
+            if k == "value" then return false end
+            return function(...) return NullShim end
+        end,
+        __newindex = function() end,
+        __call = function() return NullShim end,
+    })
+
     Library.CreateWindow = function(self, opts)
         opts = opts or {}
         if firstWindow then
-            -- Subsequent CreateWindow calls just return the first window;
-            -- keep the title fixed as "Quantum" (no banware/Lua X concatenation)
             return firstWindow
         end
-        -- Force the first window's title to always be "Quantum"
-        opts = opts or {}
         opts.Title = "Quantum"
         firstWindow = realCreate(self, opts)
+
+        local realAddTab = firstWindow.AddTab
+        if type(realAddTab) == "function" then
+            firstWindow.AddTab = function(win, name, ...)
+                local label
+                if type(name) == "string" then
+                    label = name
+                elseif type(name) == "table" and type(name.Label) == "string" then
+                    label = name.Label
+                end
+
+                -- (1) Hard suppress: swallow redundant UE-bridge lowercase tabs.
+                if label and SUPPRESS[label] then
+                    return NullShim
+                end
+
+                -- (2) Rename KH native tabs to UE-style lowercase.
+                if label and RENAME[label] then
+                    local new = RENAME[label]
+                    if type(name) == "string" then
+                        name = new
+                    else
+                        name = table.clone(name)
+                        name.Label = new
+                    end
+                    label = new
+                end
+
+                -- (3) Dedup: rename duplicate labels (e.g. multiple "Settings").
+                if label then
+                    local seen = tabNames[label]
+                    if seen then
+                        tabNames[label] = seen + 1
+                        if type(name) == "string" then
+                            name = label .. " (" .. (seen + 1) .. ")"
+                        else
+                            name = table.clone(name)
+                            name.Label = label .. " (" .. (seen + 1) .. ")"
+                        end
+                    else
+                        tabNames[label] = 1
+                    end
+                end
+                return realAddTab(win, name, ...)
+            end
+        end
+
         return firstWindow
     end
+end
+
+-- =============================================================================
+-- Master Enable — top-level toggle that turns Quantum on/off at once.
+-- Lives on a persistent Keybinds-style anchor that appears before the HVH
+-- scripts load their own tabs, so the user always has one place to arm/disarm.
+-- =============================================================================
+_G.__QuantumMaster = _G.__QuantumMaster or {
+    enabled = true,  -- default ON so the loader "just works"
+    listeners = {},
+}
+do
+    local M = _G.__QuantumMaster
+    function M.On(cb)   table.insert(M.listeners, cb) end
+    function M.Set(v)
+        v = v and true or false
+        if M.enabled == v then return end
+        M.enabled = v
+        for _, cb in ipairs(M.listeners) do pcall(cb, v) end
+        if _G.__QuantumLibrary and _G.__QuantumLibrary.Notify then
+            pcall(_G.__QuantumLibrary.Notify, _G.__QuantumLibrary,
+                  "Quantum " .. (v and "ENABLED" or "DISABLED"), 2)
+        end
+        -- Fan out the switch to known modules
+        if not v then
+            if _G.__NebulaConfig then _G.__NebulaConfig.CtrOn = false end
+            _G.__QuantumAllowCharMove = false
+        end
+    end
+    -- Simple keybind: RightCtrl toggles master
+    task.spawn(function()
+        local UIS = game:GetService("UserInputService")
+        UIS.InputBegan:Connect(function(input, gp)
+            if gp then return end
+            if input.KeyCode == Enum.KeyCode.RightControl then
+                M.Set(not M.enabled)
+            end
+        end)
+    end)
 end
 
 -- =============================================================================
@@ -89929,545 +90049,462 @@ end
     local function opts_ambience_sounds() return { "None", "Rain", "Wind", "Birds" } end
 
 
-    -- =============== Tab: main ===============
+
+    -- =============================================================================
+    -- Quantum UI v3 — UE (Unnamed Enhancements)-style 7-tab layout
+    -- Tabs: main / world / esp / visuals / character / misc / settings
+    -- Each groupbox puts its "enabled" FIRST so the feature can actually be
+    -- switched on. Everything binds straight to KH state.
+    -- =============================================================================
+
+    -- ====== Tab: main ======
     pcall(function()
         local Tab = Window:AddTab("main")
+
         pcall(function()
-            local G = Tab:AddLeftGroupbox("Aimbot")
-            bindToggle(G, "KH_Aimbot_Enabled_MASTER", "Enabled", {"Aimbot","Enabled"})
-            bindDropdown(G, "KH_Aimbot_ActivationConditions_1", "Activation Rules", {"Default"}, true, {"Aimbot","ActivationConditions"})
-            bindSlider(G, "KH_Aimbot_ReactionTime_2", "Reaction Delay (s)", 0.0, 2.0, 2, {"Aimbot","ReactionTime"})
-            bindSlider(G, "KH_Aimbot_SwitchDelay_3", "Switch Delay (s)", 0.0, 2.0, 2, {"Aimbot","SwitchDelay"})
-            bindDropdown(G, "KH_Aimbot_Type_4", "Aim Mode", {"Default"}, false, {"Aimbot","Mode","Type"})
-            bindSlider(G, "KH_Aimbot_Speed_5", "Linear Speed", 0.01, 1.0, 2, {"Aimbot","Mode","Speed"})
-            bindSlider(G, "KH_Aimbot_Speed_6", "AI Speed", 0.01, 1.0, 2, {"Aimbot","Mode","Speed"})
-            bindSlider(G, "KH_Aimbot_Speed_7", "Spring Speed", 0.01, 1.0, 2, {"Aimbot","Mode","Speed"})
-            bindToggle(G, "KH_Aimbot_Enabled_8", "Enable Target Lock", {"Aimbot","TargetLock","Enabled"})
-            bindDropdown(G, "KH_Aimbot_Mode_9", "Lock Mode", {"ToggleLock","AutoLock","ManualOnly"}, false, {"Aimbot","TargetLock","Mode"})
+            local G = Tab:AddLeftGroupbox("silent aim")
+            bindToggle(G, "UE_SA_Enabled",      "enabled",       {"SilentAim","Enabled"})
+            bindToggle(G, "UE_SA_Manipulate",   "manipulation",  {"SilentAim","Manipulate","Enabled"})
+            bindToggle(G, "UE_SA_ClosestPart",  "closest part",  {"SilentAim","ClosestPart","Enabled"})
+            bindToggle(G, "UE_SA_Visualize",    "visualize",     {"SilentAim","Visualize"})
+            bindToggle(G, "UE_SA_ShowFov",      "show fov",      {"SilentAim","ShowFov"})
+            bindSlider(G, "UE_SA_Radius",       "radius",       1.0, 300.0, 0, {"SilentAim","Radius"}, {suffix="px"})
+            bindSlider(G, "UE_SA_HitChance",    "hit chance",   0.0, 100.0, 0, {"SilentAim","ActivationChance"}, {suffix="%"})
         end)
         pcall(function()
-            local G = Tab:AddRightGroupbox("SilentAim")
-            bindToggle(G, "KH_SilentAim_Enabled_MASTER", "Enabled", {"SilentAim","Enabled"})
-            bindToggle(G, "KH_SilentAim_Enabled_10", "Manipulate", {"SilentAim","Manipulate","Enabled"})
-            bindDropdown(G, "KH_SilentAim_Manipulate_11", "Manipulation Check", {"OnBestTarget","OnAllTargets"}, false, {"SilentAim","Manipulate"})
-            bindToggle(G, "KH_SilentAim_ShowIndicator_12", "Show Indicator", {"SilentAim","Manipulate","ShowIndicator"})
-            bindSlider(G, "KH_SilentAim_ActivationChance_13", "Activation Chance (%)", 0.0, 100.0, 0, {"SilentAim","ActivationChance"})
-            bindDropdown(G, "KH_SilentAim_ActivationConditions_14", "Activation Rules", {"Default"}, true, {"SilentAim","ActivationConditions"})
-            bindSlider(G, "KH_SilentAim_ReactionTime_15", "Reaction Delay (s)", 0.0, 2.0, 2, {"SilentAim","ReactionTime"})
-            bindSlider(G, "KH_SilentAim_SwitchDelay_16", "Switch Delay (s)", 0.0, 2.0, 2, {"SilentAim","SwitchDelay"})
+            local G = Tab:AddLeftGroupbox("aimbot")
+            bindToggle(G,  "UE_AB_Enabled",     "enabled",       {"Aimbot","Enabled"})
+            bindDropdown(G,"UE_AB_Mode",        "aim mode",     {"Default"}, false, {"Aimbot","Mode","Type"})
+            bindSlider(G,  "UE_AB_Speed",       "linear speed", 0.01, 1.0, 2, {"Aimbot","Mode","Speed"})
         end)
         pcall(function()
-            local G = Tab:AddLeftGroupbox("Triggerbot")
-            bindToggle(G, "KH_Triggerbot_Enabled_MASTER", "Enabled", {"Triggerbot","Enabled"})
-            bindDropdown(G, "KH_Triggerbot_ActivationConditions_17", "Activation Rules", {"Default"}, true, {"Triggerbot","ActivationConditions"})
-            bindDropdown(G, "KH_Triggerbot_TargetConditions_18", "Target Filters", {"Default"}, true, {"Triggerbot","TargetConditions"})
-            bindSlider(G, "KH_Triggerbot_ReactionTime_19", "Reaction Delay (s)", 0.0, 2.0, 2, {"Triggerbot","ReactionTime"})
-            bindSlider(G, "KH_Triggerbot_ReleaseTime_20", "Release Delay (s)", 0.0, 2.0, 2, {"Triggerbot","ReleaseTime"})
+            local G = Tab:AddLeftGroupbox("targeting")
+            bindToggle(G,  "UE_TG_VisibleOnly",   "visible only",      {"TargetConditions","VisibleOnly"})
+            bindToggle(G,  "UE_TG_IgnoreProt",    "ignore protected",  {"TargetConditions","IgnoreProtected"})
+            bindToggle(G,  "UE_TG_DisableFlash",  "disable on flash",  {"TargetConditions","DisableOnFlash"})
+            bindToggle(G,  "UE_TG_LimitDist",     "limit distance",    {"TargetConditions","LimitDistance"})
+            bindSlider(G,  "UE_TG_Reaction",      "reaction time",   0.0, 2.0, 2, {"TargetConditions","ReactionTime"}, {suffix="s"})
+            bindSlider(G,  "UE_TG_Forget",        "forget time",     0.0, 2.0, 2, {"TargetConditions","ForgetTime"},   {suffix="s"})
+            bindDropdown(G,"UE_TG_Part",          "target part",   {"Head","UpperTorso","LowerTorso","Closest"}, false, {"HitboxPoint","Preferred"})
+            bindDropdown(G,"UE_TG_Blacklist",     "closest part blacklist", {"Default"}, true, {"HitboxPoint","Blacklist"})
+        end)
+
+        pcall(function()
+            local G = Tab:AddRightGroupbox("triggerbot")
+            bindToggle(G, "UE_TB_Enabled",         "enabled",            {"Triggerbot","Enabled"})
+            bindSlider(G, "UE_TB_Reaction",        "reaction time",      0.0, 2.0, 2, {"Triggerbot","ReactionTime"}, {suffix="s"})
+            bindSlider(G, "UE_TB_ReactionOffset",  "reaction time offset", 0.0, 500.0, 0, {"Triggerbot","ReactionOffset"}, {suffix="ms"})
+            bindSlider(G, "UE_TB_Forget",          "forget time",        0.0, 2.0, 2, {"Triggerbot","ForgetTime"},   {suffix="s"})
+            bindSlider(G, "UE_TB_ShootDelay",      "shoot delay",        0.0, 500.0, 0, {"Triggerbot","ShootDelay"},   {suffix="ms"})
+            bindSlider(G, "UE_TB_MaxDistance",     "max distance",       0.0, 1000.0, 0, {"Triggerbot","MaxDistance"},  {suffix="s"})
+            bindDropdown(G,"UE_TB_PartBlacklist",  "part blacklist",     {"Default"}, true, {"Triggerbot","PartBlacklist"})
+            bindToggle(G,  "UE_TB_AntiKatana",     "anti katana",        {"Triggerbot","AntiKatana"})
+            bindDropdown(G,"UE_TB_CheckScoped",    "check scoped if",    {"Sniper","Crossbow","AssaultRifle"}, true, {"Triggerbot","CheckScopedIf"})
         end)
         pcall(function()
-            local G = Tab:AddRightGroupbox("Flickbot")
-            bindToggle(G, "KH_Flickbot_Enabled_MASTER", "Enabled", {"Flickbot","Enabled"})
-            bindToggle(G, "KH_Flickbot_Shoot_21", "Shoot", {"Flickbot","Shoot"})
-            bindSlider(G, "KH_Flickbot_ShotDelay_22", "Shot Delay (ms)", 0.0, 250.0, 0, {"Flickbot","ShotDelay"})
-            bindSlider(G, "KH_Flickbot_Cooldown_23", "Cooldown (ms)", 0.0, 2000.0, 0, {"Flickbot","Cooldown"})
-            bindSlider(G, "KH_Flickbot_FlickDuration_24", "Flick Duration (ms)", 30.0, 400.0, 0, {"Flickbot","FlickDuration"})
-            bindSlider(G, "KH_Flickbot_Curvature_25", "Curvature", 0.0, 50.0, 0, {"Flickbot","Curvature"})
-            bindSlider(G, "KH_Flickbot_Humanness_26", "Humanness", 0.0, 100.0, 0, {"Flickbot","Humanness"})
+            local G = Tab:AddRightGroupbox("weapons")
+            bindToggle(G, "UE_WP_NoSpread",     "no spread",      {"Weapons","NoSpread"})
+            bindToggle(G, "UE_WP_FullAuto",     "full auto",      {"Weapons","FullAuto"})
+            bindToggle(G, "UE_WP_AlwaysStab",   "always backstab", {"Weapons","AlwaysBackstab"})
+            bindSlider(G, "UE_WP_Firerate",     "firerate",       0.0, 100.0, 0, {"Weapons","Firerate"}, {suffix="%"})
         end)
         pcall(function()
-            local G = Tab:AddLeftGroupbox("Ragebot")
-            bindToggle(G, "KH_Ragebot_Enabled_MASTER", "Enabled", {"Ragebot","Enabled"})
-            bindToggle(G, "KH_Ragebot_UtilizeHealthLead_27", "Utilize Health Lead", {"Ragebot","UtilizeHealthLead"})
-            bindToggle(G, "KH_Ragebot_PrioritizeHackers_29", "Prioritize Hackers", {"Ragebot","PrioritizeHackers"})
-            bindSlider(G, "KH_Ragebot_Stability_30", "Stability", 0.0, 1.5, 2, {"Ragebot","Stability"})
-            bindSlider(G, "KH_Ragebot_ShootFrames_31", "Shoot Frames", 1.0, 5.0, 0, {"Ragebot","ShootFrames"})
-            bindDropdown(G, "KH_Ragebot_OnEmpty_33", "On Empty", {"Reload","Swap","SwapOrReload"}, false, {"Ragebot","Weapons","OnEmpty"})
-            bindRangeSlider(G, "KH_Ragebot_DepthForward_34", "Forward Depth", 0.0, 10.0, {"Ragebot","Evasion","ProjectileBreaker","DepthForward"})
-            bindSlider(G, "KH_Ragebot_DepthForwardFrequency_35", "Forward Frequency", 0.0, 20.0, 1, {"Ragebot","Evasion","ProjectileBreaker","DepthForwardFrequency"})
-            bindRangeSlider(G, "KH_Ragebot_DepthUp_36", "Upward Depth", 0.0, 10.0, {"Ragebot","Evasion","ProjectileBreaker","DepthUp"})
-            bindSlider(G, "KH_Ragebot_DepthUpFrequency_37", "Upward Frequency", 0.0, 20.0, 1, {"Ragebot","Evasion","ProjectileBreaker","DepthUpFrequency"})
-            bindSlider(G, "KH_Ragebot_RepositionInterval_38", "Reposition Interval (s)", 0.05, 2.0, 2, {"Ragebot","Evasion","ProjectileBreaker","RepositionInterval"})
-            bindToggle(G, "KH_Ragebot_FallbackAnchorFromCharacter_39", "Fallback Character Origin", {"Ragebot","Evasion","ProjectileBreaker","FallbackAnchorFromCharacter"})
-            bindSlider(G, "KH_Ragebot_FallbackBaseRadius_40", "Fallback Radius", 5.0, 100000000.0, 0, {"Ragebot","Evasion","ProjectileBreaker","FallbackBaseRadius"})
-            bindSlider(G, "KH_Ragebot_FallbackRadiusRandomFactor_41", "Fallback Random Factor", 0.0, 1.0, 1, {"Ragebot","Evasion","ProjectileBreaker","FallbackRadiusRandomFactor"})
-            bindDropdown(G, "KH_Ragebot_Mode_42", "Evasion Mode", {"Off","Random","Translocate","ProjectileBreaker"}, false, {"Ragebot","Evasion","Mode"})
-            bindToggle(G, "KH_Ragebot_AnchorFromCharacter_43", "Character Origin", {"Ragebot","Evasion","Random","AnchorFromCharacter"})
-            bindSlider(G, "KH_Ragebot_BaseRadius_44", "Base Radius", 5.0, 100000000.0, 0, {"Ragebot","Evasion","Random","BaseRadius"})
-            bindSlider(G, "KH_Ragebot_RadiusRandomFactor_45", "Random Factor", 0.0, 1.0, 1, {"Ragebot","Evasion","Random","RadiusRandomFactor"})
-            bindSlider(G, "KH_Ragebot_Offset_46", "Offset", -5.0, 5.0, 1, {"Ragebot","Evasion","Translocate","Offset"})
+            local G = Tab:AddRightGroupbox("ragebot / priority")
+            bindToggle(G,  "UE_RB_Enabled",     "enabled",        {"Ragebot","Enabled"})
+            bindToggle(G,  "UE_RB_VoidSpam",    "void spam",      {"Ragebot","VoidSpam"})
+            bindToggle(G,  "UE_RB_ProjMimic",   "projectile mimic", {"Ragebot","ProjectileMimic"})
+            bindSlider(G,  "UE_RB_ShootAttempts","shoot attempts", 1.0, 10.0, 0, {"Ragebot","ShootAttempts"}, {suffix="x"})
+            bindDropdown(G,"UE_RB_AttackMode",   "attack mode",   {"gun","melee"}, false, {"Ragebot","AttackMode"})
+            bindDropdown(G,"UE_RB_PrefWeapon",   "preferred weapon", {"primary","secondary","any"}, false, {"Ragebot","PreferredWeapon"})
         end)
+        -- Fire Assist (from KH Combat)
         pcall(function()
-            local G = Tab:AddRightGroupbox("TargetConditions")
-            bindDropdown(G, "KH_TargetConditions_TargetConditions_47", "Target Filters", {"Default"}, true, {"TargetConditions"})
+            local G = Tab:AddLeftGroupbox("fire assist")
+            bindToggle(G, "UE_FA_Enabled",     "enabled",        {"FireAssist","Enabled"})
+            bindToggle(G, "UE_FA_AutoFire",    "auto fire",      {"FireAssist","AutoFire"})
+            bindSlider(G, "UE_FA_FlickSpeed",  "flick speed",  0.0, 100.0, 0, {"FireAssist","FlickSpeed"})
         end)
+        -- Weapon Handling (from KH Combat)
         pcall(function()
-            local G = Tab:AddLeftGroupbox("HitboxPoint")
-            bindDropdown(G, "KH_HitboxPoint_Type_48", "Aim Point", {"Center","Surface"}, false, {"HitboxPoint","Type"})
-            bindSlider(G, "KH_HitboxPoint_SizeReductionPercentage_49", "Surface Reduction (%)", 0.0, 100.0, 2, {"HitboxPoint","Surface","SizeReductionPercentage"})
-            bindToggle(G, "KH_HitboxPoint_PreserveDepth_50", "Preserve Depth", {"HitboxPoint","Surface","PreserveDepth"})
+            local G = Tab:AddRightGroupbox("weapon handling")
+            bindToggle(G, "UE_WH_Enabled",       "enabled",           {"WeaponHandling","Enabled"})
+            bindToggle(G, "UE_WH_FastReload",    "fast reload",       {"WeaponHandling","FastReload"})
+            bindToggle(G, "UE_WH_FastSwitch",    "fast switch",       {"WeaponHandling","FastSwitch"})
+            bindSlider(G, "UE_WH_SwitchSpeed",   "switch speed",    1.0, 5.0, 2,  {"WeaponHandling","SwitchSpeed"}, {suffix="x"})
+            bindToggle(G, "UE_WH_FastGrenade",   "fast grenade",      {"WeaponHandling","FastGrenade"})
+            bindToggle(G, "UE_WH_MeleeInsta",    "instant melee",     {"WeaponHandling","MeleeInstant"})
         end)
+        -- Hit Feedback (from KH Combat)
         pcall(function()
-            local G = Tab:AddRightGroupbox("HitboxSelection")
-            bindDropdown(G, "KH_HitboxSelection_Type_51", "Hitbox Selection", {"ClosestToCrosshair","Random"}, false, {"HitboxSelection","Type"})
-            bindSlider(G, "KH_HitboxSelection_Random_52", "Random", 0.0, 100.0, 0, {"HitboxSelection","Random"})
+            local G = Tab:AddLeftGroupbox("hit feedback")
+            bindToggle(G, "UE_HF_Enabled",      "enabled",            {"PlayerHit","Enabled"})
+            bindToggle(G, "UE_HF_HitSound",     "play hit sound",     {"PlayerHit","Sound","Enabled"})
+            bindToggle(G, "UE_HF_HitChams",     "hit chams",          {"PlayerHit","Chams","Enabled"})
+            bindToggle(G, "UE_HF_HitFlash",     "hit flash",          {"PlayerHit","HitFlash","Enabled"})
+            bindToggle(G, "UE_HF_HitNotif",     "hit notification",   {"PlayerHit","Notification","Enabled"})
+            bindToggle(G, "UE_HF_ElimMaster",   "elimination feedback",  {"PlayerElimination","Enabled"})
+            bindToggle(G, "UE_HF_ElimSound",    "elimination sound",  {"PlayerElimination","Sound","Enabled"})
+            bindToggle(G, "UE_HF_ElimChams",    "elimination chams",  {"PlayerElimination","Chams","Enabled"})
+            bindToggle(G, "UE_HF_ElimFlash",    "elimination flash",  {"PlayerElimination","KillFlash","Enabled"})
         end)
     end)
 
-    -- =============== Tab: esp ===============
-    pcall(function()
-        local Tab = Window:AddTab("esp")
-        pcall(function()
-            local G = Tab:AddLeftGroupbox("Chams")
-            bindToggle(G, "KH_Chams_Enabled_53", "Enable Character Chams", {"Chams","Character","Enabled"})
-            bindColor(G, "KH_Chams_Color_54", "Color", {"Chams","Character","Color"})
-            bindDropdown(G, "KH_Chams_Material_55", "Character Chams Material", {"Default"}, false, {"Chams","Character","Material"})
-            bindToggle(G, "KH_Chams_StripTextures_56", "Strip Character Chams Textures", {"Chams","Character","StripTextures"})
-            bindToggle(G, "KH_Chams_Enabled_57", "Enabled", {"Chams","Enabled"})
-            bindColor(G, "KH_Chams_Color_58", "Color", {"Chams","Color"})
-            bindDropdown(G, "KH_Chams_Material_59", "Material", {"Default"}, false, {"Chams","Material"})
-            bindToggle(G, "KH_Chams_StripTextures_60", "Strip ", {"Chams","StripTextures"})
-        end)
-        pcall(function()
-            local G = Tab:AddRightGroupbox("ViewModelHighlight")
-            bindToggle(G, "KH_ViewModelHighlight_Enabled_61", "Enabled", {"ViewModelHighlight","Enabled"})
-            bindColor(G, "KH_ViewModelHighlight_FillColor_62", "FillColor", {"ViewModelHighlight","FillColor"})
-            bindToggle(G, "KH_ViewModelHighlight_AlwaysOnTop_63", "AlwaysOnTop", {"ViewModelHighlight","AlwaysOnTop"})
-            bindSlider(G, "KH_ViewModelHighlight_FillTransparency_64", "FillTransparency", -10.0, 10.0, 2, {"ViewModelHighlight","FillTransparency"})
-            bindColor(G, "KH_ViewModelHighlight_OutlineColor_65", "OutlineColor", {"ViewModelHighlight","OutlineColor"})
-            bindSlider(G, "KH_ViewModelHighlight_OutlineTransparency_66", "OutlineTransparency", -10.0, 10.0, 2, {"ViewModelHighlight","OutlineTransparency"})
-        end)
-        pcall(function()
-            local G = Tab:AddLeftGroupbox("BulletTracers")
-            bindToggle(G, "KH_BulletTracers_Enabled_67", "Enable Bullet Tracers", {"BulletTracers","Enabled"})
-            bindDropdown(G, "KH_BulletTracers_Style_68", "Tracer Style", {"Default"}, false, {"BulletTracers","Style"})
-            bindSlider(G, "KH_BulletTracers_Width_69", "Tracer Width", 0.02, 0.5, 2, {"BulletTracers","Width"})
-            bindSlider(G, "KH_BulletTracers_TextureLength_70", "Texture Length", 0.5, 20.0, 1, {"BulletTracers","TextureLength"})
-            bindSlider(G, "KH_BulletTracers_TextureSpeed_71", "Texture Speed", 0.0, 10.0, 1, {"BulletTracers","TextureSpeed"})
-            bindSlider(G, "KH_BulletTracers_Lifetime_72", "Tracer Lifetime", 0.1, 5.0, 1, {"BulletTracers","Lifetime"})
-            bindSlider(G, "KH_BulletTracers_FadeTime_73", "Fade Time", 0.0, 5.0, 1, {"BulletTracers","FadeTime"})
-            bindSlider(G, "KH_BulletTracers_Emission_74", "Emission", 0.0, 1.0, 2, {"BulletTracers","Emission"})
-            bindSlider(G, "KH_BulletTracers_Glow_75", "Glow", 1.0, 25.0, 0, {"BulletTracers","Glow"})
-            bindToggle(G, "KH_BulletTracers_Expand_76", "Expand Tracers", {"BulletTracers","Expand"})
-            bindSlider(G, "KH_BulletTracers_ExpandSpeed_77", "Expand Speed", 1.0, 60.0, 0, {"BulletTracers","ExpandSpeed"})
-            bindSlider(G, "KH_BulletTracers_ExpandDamper_78", "Expand Damper", 0.1, 1.0, 2, {"BulletTracers","ExpandDamper"})
-        end)
-    end)
-
-    -- =============== Tab: visuals ===============
-    pcall(function()
-        local Tab = Window:AddTab("visuals")
-        pcall(function()
-            local G = Tab:AddLeftGroupbox("CustomCrosshair")
-            bindSlider(G, "KH_CustomCrosshair_Size_79", "Crosshair Image Size", 8.0, 256.0, 0, {"CustomCrosshair","Image","Size"})
-            bindSlider(G, "KH_CustomCrosshair_Transparency_80", "Crosshair Image Transparency", 0.0, 1.0, 2, {"CustomCrosshair","Image","Transparency"})
-            bindToggle(G, "KH_CustomCrosshair_Enabled_81", "Enabled", {"CustomCrosshair","Enabled"})
-            bindSlider(G, "KH_CustomCrosshair_Length_82", "Line Length", 1.0, 100.0, 0, {"CustomCrosshair","Length"})
-            bindSlider(G, "KH_CustomCrosshair_Thickness_83", "Line Thickness", 1.0, 20.0, 0, {"CustomCrosshair","Thickness"})
-            bindSlider(G, "KH_CustomCrosshair_Gap_84", "Line Gap", 0.0, 100.0, 0, {"CustomCrosshair","Gap"})
-            bindToggle(G, "KH_CustomCrosshair_Enabled_85", "Crosshair Outline", {"CustomCrosshair","Outline","Enabled"})
-            bindColor(G, "KH_CustomCrosshair_Color_86", "Color", {"CustomCrosshair","Outline","Color"})
-            bindSlider(G, "KH_CustomCrosshair_Thickness_87", "Crosshair Outline Thickness", 0.0, 10.0, 0, {"CustomCrosshair","Outline","Thickness"})
-            bindToggle(G, "KH_CustomCrosshair_Enabled_88", "Enable Crosshair", {"CustomCrosshair","Enabled"})
-            bindDropdown(G, "KH_CustomCrosshair_Style_89", "Crosshair Style", {"Lines","Image"}, false, {"CustomCrosshair","Style"})
-            bindToggle(G, "KH_CustomCrosshair_Enabled_90", "Follow Target", {"CustomCrosshair","FollowTarget","Enabled"})
-            bindDropdown(G, "KH_CustomCrosshair_Mode_91", "Follow Target Mode", {"Crosshair","Crosshair + Text"}, false, {"CustomCrosshair","FollowTarget","Mode"})
-            bindSlider(G, "KH_CustomCrosshair_Speed_92", "Follow Speed", 1.0, 50.0, 0, {"CustomCrosshair","FollowTarget","Speed"})
-            bindSlider(G, "KH_CustomCrosshair_Damper_93", "Follow Damper", 0.0, 30.0, 0, {"CustomCrosshair","FollowTarget","Damper"})
-            bindSlider(G, "KH_CustomCrosshair_SnapDistance_94", "Snap Distance", 0.0, 10.0, 0, {"CustomCrosshair","FollowTarget","SnapDistance"})
-            bindToggle(G, "KH_CustomCrosshair_Enabled_95", "Rotate Crosshair", {"CustomCrosshair","Rotation","Enabled"})
-            bindSlider(G, "KH_CustomCrosshair_Speed_96", "Crosshair Rotation Speed", 0.0, 720.0, 0, {"CustomCrosshair","Rotation","Speed"})
-            bindToggle(G, "KH_CustomCrosshair_Enabled_97", "Crosshair Spread", {"CustomCrosshair","Spread","Enabled"})
-            bindRangeSlider(G, "KH_CustomCrosshair_Range_98", "Crosshair Spread Range", 0.0, 100.0, {"CustomCrosshair","Spread","Range"})
-            bindSlider(G, "KH_CustomCrosshair_Speed_99", "Spread Speed", 0.0, 20.0, 1, {"CustomCrosshair","Spread","Speed"})
-            bindSlider(G, "KH_CustomCrosshair_Angle_100", "Rotation", 0.0, 360.0, 0, {"CustomCrosshair","Rotation","Angle"})
-            bindInput(G, "KH_CustomCrosshair_Content_101", "Crosshair Text Content", {"CustomCrosshair","Text","Content"})
-            bindDropdown(G, "KH_CustomCrosshair_Font_102", "Crosshair Text Font", {"Default"}, false, {"CustomCrosshair","Text","Font"})
-            bindSlider(G, "KH_CustomCrosshair_Size_103", "Crosshair Text Size", 6.0, 48.0, 0, {"CustomCrosshair","Text","Size"})
-            bindSlider(G, "KH_CustomCrosshair_Offset_104", "Crosshair Text Offset", 0.0, 100.0, 0, {"CustomCrosshair","Text","Offset"})
-            bindColor(G, "KH_CustomCrosshair_Color_105", "Crosshair Text Color", {"CustomCrosshair","Text","Color"})
-            bindToggle(G, "KH_CustomCrosshair_Enabled_106", "Crosshair Text Outline", {"CustomCrosshair","Text","Outline","Enabled"})
-            bindColor(G, "KH_CustomCrosshair_Color_107", "Color", {"CustomCrosshair","Text","Outline","Color"})
-            bindSlider(G, "KH_CustomCrosshair_Thickness_108", "Crosshair Text Outline Thickness", 0.0, 10.0, 0, {"CustomCrosshair","Text","Outline","Thickness"})
-            bindToggle(G, "KH_CustomCrosshair_Enabled_109", "Enable Crosshair Text", {"CustomCrosshair","Text","Enabled"})
-        end)
-        pcall(function()
-            local G = Tab:AddRightGroupbox("Removables")
-            bindToggle(G, "KH_Removables_NoFlashbang_110", "Hide Flashbang Effect", {"Removables","NoFlashbang"})
-            bindToggle(G, "KH_Removables_NoBurnEffect_111", "Hide Burn Effect", {"Removables","NoBurnEffect"})
-            bindToggle(G, "KH_Removables_NoAdsVignette_112", "Hide ADS Vignette", {"Removables","NoAdsVignette"})
-            bindToggle(G, "KH_Removables_NoScopeOverlay_113", "Hide Scope Overlay", {"Removables","NoScopeOverlay"})
-            bindToggle(G, "KH_Removables_NoScopeReticle_114", "Hide Scope Reticle", {"Removables","NoScopeReticle"})
-            bindToggle(G, "KH_Removables_NoHitmarker_115", "Hide Hitmarker", {"Removables","NoHitmarker"})
-            bindToggle(G, "KH_Removables_NoMuzzleFlash_116", "Hide Muzzle Flash", {"Removables","NoMuzzleFlash"})
-            bindToggle(G, "KH_Removables_NoGunTracers_117", "Hide Game Tracers", {"Removables","NoGunTracers"})
-        end)
-        pcall(function()
-            local G = Tab:AddLeftGroupbox("PlayerHit")
-            bindToggle(G, "KH_PlayerHit_Enabled_118", "Enable Hit Feedback", {"PlayerHit","Enabled"})
-            bindToggle(G, "KH_PlayerHit_Enabled_119", "Play Hit Sound", {"PlayerHit","Sound","Enabled"})
-            bindDropdown(G, "KH_PlayerHit_HeadName_120", "Headshot Sound", {"Default"}, false, {"PlayerHit","Sound","HeadName"})
-            bindSlider(G, "KH_PlayerHit_HeadVolume_121", "Headshot Volume", 0.1, 10.0, 1, {"PlayerHit","Sound","HeadVolume"})
-            bindSlider(G, "KH_PlayerHit_HeadPitch_122", "Headshot Pitch", 0.1, 3.0, 1, {"PlayerHit","Sound","HeadPitch"})
-            bindDropdown(G, "KH_PlayerHit_BodyName_123", "Body Hit Sound", {"Default"}, false, {"PlayerHit","Sound","BodyName"})
-            bindSlider(G, "KH_PlayerHit_BodyVolume_124", "Body Hit Volume", 0.1, 10.0, 1, {"PlayerHit","Sound","BodyVolume"})
-            bindSlider(G, "KH_PlayerHit_BodyPitch_125", "Body Hit Pitch", 0.1, 3.0, 1, {"PlayerHit","Sound","BodyPitch"})
-            bindToggle(G, "KH_PlayerHit_DisableGameSound_126", "Mute Game Hit Sound", {"PlayerHit","Sound","DisableGameSound"})
-            bindToggle(G, "KH_PlayerHit_Enabled_127", "Enable Hit Chams", {"PlayerHit","Chams","Enabled"})
-            bindColor(G, "KH_PlayerHit_Color_128", "Color", {"PlayerHit","Chams","Color"})
-            bindSlider(G, "KH_PlayerHit_Duration_129", "Hit Chams Duration", 0.1, 3.0, 1, {"PlayerHit","Chams","Duration"})
-            bindDropdown(G, "KH_PlayerHit_Material_130", "Hit Chams Material", {"Default"}, false, {"PlayerHit","Chams","Material"})
-            bindToggle(G, "KH_PlayerHit_Enabled_131", "Enable Hit Flash", {"PlayerHit","HitFlash","Enabled"})
-            bindColor(G, "KH_PlayerHit_Color_132", "Color", {"PlayerHit","HitFlash","Color"})
-            bindSlider(G, "KH_PlayerHit_Duration_133", "Hit Flash Duration", 0.1, 3.0, 1, {"PlayerHit","HitFlash","Duration"})
-            bindToggle(G, "KH_PlayerHit_Enabled_134", "Enable Hit Notification", {"PlayerHit","Notification","Enabled"})
-            bindInput(G, "KH_PlayerHit_Text_135", "Hit Notification Text", {"PlayerHit","Notification","Text"})
-            bindToggle(G, "KH_PlayerHit_Enabled_136", "Enable Hit Feedback", {"PlayerHit","Enabled"})
-            bindToggle(G, "KH_PlayerHit_Enabled_137", "Play Hit Sound", {"PlayerHit","Sound","Enabled"})
-            bindDropdown(G, "KH_PlayerHit_HeadName_138", "Sound", {"Default"}, false, {"PlayerHit","Sound","HeadName"})
-            bindSlider(G, "KH_PlayerHit_HeadVolume_139", "Volume", 0.1, 10.0, 1, {"PlayerHit","Sound","HeadVolume"})
-            bindSlider(G, "KH_PlayerHit_HeadPitch_140", "Pitch", 0.1, 3.0, 1, {"PlayerHit","Sound","HeadPitch"})
-            bindDropdown(G, "KH_PlayerHit_BodyName_141", "Sound", {"Default"}, false, {"PlayerHit","Sound","BodyName"})
-            bindSlider(G, "KH_PlayerHit_BodyVolume_142", "Volume", 0.1, 10.0, 1, {"PlayerHit","Sound","BodyVolume"})
-            bindSlider(G, "KH_PlayerHit_BodyPitch_143", "Pitch", 0.1, 3.0, 1, {"PlayerHit","Sound","BodyPitch"})
-            bindToggle(G, "KH_PlayerHit_DisableGameSound_144", "Mute Game Hit Sound", {"PlayerHit","Sound","DisableGameSound"})
-            bindToggle(G, "KH_PlayerHit_Enabled_145", "Enable Hit Chams", {"PlayerHit","Chams","Enabled"})
-            bindColor(G, "KH_PlayerHit_Color_146", "Color / Transparency", {"PlayerHit","Chams","Color"})
-            bindSlider(G, "KH_PlayerHit_Duration_147", "Duration", 0.1, 3.0, 1, {"PlayerHit","Chams","Duration"})
-            bindToggle(G, "KH_PlayerHit_Enabled_148", "Enable Hit Flash", {"PlayerHit","HitFlash","Enabled"})
-            bindColor(G, "KH_PlayerHit_Color_149", "Color", {"PlayerHit","HitFlash","Color"})
-            bindSlider(G, "KH_PlayerHit_Duration_150", "Duration", 0.1, 3.0, 1, {"PlayerHit","HitFlash","Duration"})
-            bindToggle(G, "KH_PlayerHit_Enabled_151", "Enable Hit Notification", {"PlayerHit","Notification","Enabled"})
-            bindInput(G, "KH_PlayerHit_Text_152", "Text", {"PlayerHit","Notification","Text"})
-        end)
-        pcall(function()
-            local G = Tab:AddRightGroupbox("PlayerElimination")
-            bindToggle(G, "KH_PlayerElimination_Enabled_153", "Enable Elimination Feedback", {"PlayerElimination","Enabled"})
-            bindToggle(G, "KH_PlayerElimination_Enabled_154", "Play Elimination Sound", {"PlayerElimination","Sound","Enabled"})
-            bindDropdown(G, "KH_PlayerElimination_Name_155", "Elimination Sound", {"Default"}, false, {"PlayerElimination","Sound","Name"})
-            bindSlider(G, "KH_PlayerElimination_Volume_156", "Elimination Volume", 0.1, 10.0, 1, {"PlayerElimination","Sound","Volume"})
-            bindSlider(G, "KH_PlayerElimination_Pitch_157", "Elimination Pitch", 0.1, 3.0, 1, {"PlayerElimination","Sound","Pitch"})
-            bindToggle(G, "KH_PlayerElimination_Enabled_158", "Enable Elimination Chams", {"PlayerElimination","Chams","Enabled"})
-            bindColor(G, "KH_PlayerElimination_Color_159", "Color", {"PlayerElimination","Chams","Color"})
-            bindSlider(G, "KH_PlayerElimination_Duration_160", "Elimination Chams Duration", 0.1, 3.0, 1, {"PlayerElimination","Chams","Duration"})
-            bindDropdown(G, "KH_PlayerElimination_Material_161", "Elimination Chams Material", {"Default"}, false, {"PlayerElimination","Chams","Material"})
-            bindToggle(G, "KH_PlayerElimination_Enabled_162", "Enable Elimination Flash", {"PlayerElimination","KillFlash","Enabled"})
-            bindColor(G, "KH_PlayerElimination_Color_163", "Color", {"PlayerElimination","KillFlash","Color"})
-            bindSlider(G, "KH_PlayerElimination_Duration_164", "Elimination Flash Duration", 0.1, 3.0, 1, {"PlayerElimination","KillFlash","Duration"})
-            bindToggle(G, "KH_PlayerElimination_Enabled_165", "Enable Elimination Notification", {"PlayerElimination","Notification","Enabled"})
-            bindInput(G, "KH_PlayerElimination_Text_166", "Elimination Notification Text", {"PlayerElimination","Notification","Text"})
-            bindToggle(G, "KH_PlayerElimination_Enabled_167", "Enable Elimination Feedback", {"PlayerElimination","Enabled"})
-            bindToggle(G, "KH_PlayerElimination_Enabled_168", "Play Elimination Sound", {"PlayerElimination","Sound","Enabled"})
-            bindDropdown(G, "KH_PlayerElimination_Name_169", "Sound", {"Default"}, false, {"PlayerElimination","Sound","Name"})
-            bindSlider(G, "KH_PlayerElimination_Volume_170", "Volume", 0.1, 10.0, 1, {"PlayerElimination","Sound","Volume"})
-            bindSlider(G, "KH_PlayerElimination_Pitch_171", "Pitch", 0.1, 3.0, 1, {"PlayerElimination","Sound","Pitch"})
-            bindToggle(G, "KH_PlayerElimination_Enabled_172", "Enable Elimination Chams", {"PlayerElimination","Chams","Enabled"})
-            bindColor(G, "KH_PlayerElimination_Color_173", "Color / Transparency", {"PlayerElimination","Chams","Color"})
-            bindSlider(G, "KH_PlayerElimination_Duration_174", "Duration", 0.1, 3.0, 1, {"PlayerElimination","Chams","Duration"})
-            bindToggle(G, "KH_PlayerElimination_Enabled_175", "Enable Elimination Flash", {"PlayerElimination","KillFlash","Enabled"})
-            bindColor(G, "KH_PlayerElimination_Color_176", "Color", {"PlayerElimination","KillFlash","Color"})
-            bindSlider(G, "KH_PlayerElimination_Duration_177", "Duration", 0.1, 3.0, 1, {"PlayerElimination","KillFlash","Duration"})
-            bindToggle(G, "KH_PlayerElimination_Enabled_178", "Enable Elimination Notification", {"PlayerElimination","Notification","Enabled"})
-            bindInput(G, "KH_PlayerElimination_Text_179", "Text", {"PlayerElimination","Notification","Text"})
-        end)
-        pcall(function()
-            local G = Tab:AddLeftGroupbox("SoundVisualizer")
-            bindDropdown(G, "KH_SoundVisualizer_Mode_180", "Mode", {"Circle","Origin"}, false, {"SoundVisualizer","Mode"})
-            bindToggle(G, "KH_SoundVisualizer_UseLoudnessColor_181", "UseLoudnessColor", {"SoundVisualizer","UseLoudnessColor"})
-            bindToggle(G, "KH_SoundVisualizer_Enabled_182", "Enable Sound ESP", {"SoundVisualizer","Enabled"})
-            bindDropdownDynamic(G, "KH_SoundVisualizer_Source_183", "Sound Source", opts_sound_sources, false, {"SoundVisualizer","Source"})
-            bindDropdownDynamic(G, "KH_SoundVisualizer_Types_184", "Sound Types", opts_sound_types, true, {"SoundVisualizer","Types"})
-            bindSlider(G, "KH_SoundVisualizer_MinVolume_185", "Minimum Volume", 0.0, 1.0, 2, {"SoundVisualizer","MinVolume"})
-        end)
-    end)
-
-    -- =============== Tab: camera ===============
-    pcall(function()
-        local Tab = Window:AddTab("camera")
-        pcall(function()
-            local G = Tab:AddLeftGroupbox("ViewModelOffset")
-            bindToggle(G, "KH_ViewModelOffset_Enabled_186", "Enable Viewmodel Position", {"ViewModelOffset","Enabled"})
-            bindSlider(G, "KH_ViewModelOffset_X_187", "X", -7.5, 7.5, 2, {"ViewModelOffset","X"})
-            bindSlider(G, "KH_ViewModelOffset_Y_188", "Y", -7.5, 7.5, 2, {"ViewModelOffset","Y"})
-            bindSlider(G, "KH_ViewModelOffset_Z_189", "Z", -7.5, 7.5, 2, {"ViewModelOffset","Z"})
-            bindSlider(G, "KH_ViewModelOffset_Pitch_190", "Pitch", -180.0, 180.0, 0, {"ViewModelOffset","Pitch"})
-            bindSlider(G, "KH_ViewModelOffset_Yaw_191", "Yaw", -180.0, 180.0, 0, {"ViewModelOffset","Yaw"})
-            bindSlider(G, "KH_ViewModelOffset_Roll_192", "Roll", -180.0, 180.0, 0, {"ViewModelOffset","Roll"})
-        end)
-        pcall(function()
-            local G = Tab:AddRightGroupbox("ViewModelWireframe")
-            bindToggle(G, "KH_ViewModelWireframe_Enabled_193", "Enabled", {"ViewModelWireframe","Enabled"})
-            bindColor(G, "KH_ViewModelWireframe_Color_194", "Color", {"ViewModelWireframe","Color"})
-            bindSlider(G, "KH_ViewModelWireframe_Width_195", "Width", 0.001, 0.02, 0, {"ViewModelWireframe","Width"})
-        end)
-        pcall(function()
-            local G = Tab:AddLeftGroupbox("ThirdPerson")
-            bindToggle(G, "KH_ThirdPerson_RayCheck_196", "Ray Check", {"ThirdPerson","RayCheck"})
-            bindToggle(G, "KH_ThirdPerson_ShowReplica_197", "Show Replica", {"ThirdPerson","ShowReplica"})
-            bindSlider(G, "KH_ThirdPerson_X_198", "X Offset", -15.0, 15.0, 1, {"ThirdPerson","X"})
-            bindSlider(G, "KH_ThirdPerson_Y_199", "Y Offset", -5.0, 10.0, 1, {"ThirdPerson","Y"})
-            bindSlider(G, "KH_ThirdPerson_Z_200", "Z Offset", 0.0, 15.0, 1, {"ThirdPerson","Z"})
-        end)
-        pcall(function()
-            local G = Tab:AddRightGroupbox("CameraFov")
-            bindToggle(G, "KH_CameraFov_Enabled_201", "Enable Camera FOV", {"CameraFov","Enabled"})
-            bindSlider(G, "KH_CameraFov_Value_202", "Field of View", 30.0, 120.0, 0, {"CameraFov","Value"})
-        end)
-    end)
-
-    -- =============== Tab: world ===============
+    -- ====== Tab: world ======
     pcall(function()
         local Tab = Window:AddTab("world")
+
         pcall(function()
-            local G = Tab:AddLeftGroupbox("Lighting")
-            bindToggle(G, "KH_Lighting_Enabled_203", "Enable Lighting Override", {"Lighting","Enabled"})
-            bindToggle(G, "KH_Lighting_Enabled_204", "Clock Time", {"Lighting","ClockTime","Enabled"})
-            bindSlider(G, "KH_Lighting_Value_205", "Time", 0.0, 24.0, 2, {"Lighting","ClockTime","Value"})
-            bindToggle(G, "KH_Lighting_Enabled_206", "Geographic Latitude", {"Lighting","GeographicLatitude","Enabled"})
-            bindSlider(G, "KH_Lighting_Value_207", "Latitude", -90.0, 90.0, 2, {"Lighting","GeographicLatitude","Value"})
-            bindToggle(G, "KH_Lighting_Enabled_208", "Brightness", {"Lighting","Brightness","Enabled"})
-            bindSlider(G, "KH_Lighting_Value_209", "Brightness", 0.0, 10.0, 2, {"Lighting","Brightness","Value"})
-            bindToggle(G, "KH_Lighting_Enabled_210", "Exposure Compensation", {"Lighting","ExposureCompensation","Enabled"})
-            bindSlider(G, "KH_Lighting_Value_211", "Exposure", -5.0, 5.0, 2, {"Lighting","ExposureCompensation","Value"})
-            bindToggle(G, "KH_Lighting_DisableGlobalShadows_212", "Disable Global Shadows", {"Lighting","DisableGlobalShadows"})
-            bindToggle(G, "KH_Lighting_Enabled_213", "Shadow Softness", {"Lighting","ShadowSoftness","Enabled"})
-            bindSlider(G, "KH_Lighting_Value_214", "Softness", 0.0, 1.0, 2, {"Lighting","ShadowSoftness","Value"})
-            bindToggle(G, "KH_Lighting_Enabled_215", "Lighting Style", {"Lighting","LightingStyle","Enabled"})
-            bindDropdown(G, "KH_Lighting_Value_216", "Style", {"Realistic","Soft"}, false, {"Lighting","LightingStyle","Value"})
-            bindToggle(G, "KH_Lighting_Enabled_217", "Shadow Color", {"Lighting","ShadowColor","Enabled"})
-            bindColor(G, "KH_Lighting_Value_218", "Value", {"Lighting","ShadowColor","Value"})
-            bindToggle(G, "KH_Lighting_PrioritizeLightingQuality_219", "Prioritize Lighting Quality", {"Lighting","PrioritizeLightingQuality"})
-            bindToggle(G, "KH_Lighting_Enabled_220", "Ambient Colors", {"Lighting","Ambient","Enabled"})
-            bindColor(G, "KH_Lighting_Indoor_221", "Indoor", {"Lighting","Ambient","Indoor"})
-            bindColor(G, "KH_Lighting_Outdoor_222", "Outdoor", {"Lighting","Ambient","Outdoor"})
-            bindToggle(G, "KH_Lighting_Enabled_223", "Color Shift", {"Lighting","ColorShift","Enabled"})
-            bindColor(G, "KH_Lighting_Top_224", "Top", {"Lighting","ColorShift","Top"})
-            bindColor(G, "KH_Lighting_Bottom_225", "Bottom", {"Lighting","ColorShift","Bottom"})
-            bindToggle(G, "KH_Lighting_Enabled_226", "Environment Diffuse Scale", {"Lighting","EnvironmentDiffuseScale","Enabled"})
-            bindSlider(G, "KH_Lighting_Value_227", "Diffuse Scale", 0.0, 1.0, 2, {"Lighting","EnvironmentDiffuseScale","Value"})
-            bindToggle(G, "KH_Lighting_Enabled_228", "Environment Specular Scale", {"Lighting","EnvironmentSpecularScale","Enabled"})
-            bindSlider(G, "KH_Lighting_Value_229", "Specular Scale", 0.0, 1.0, 2, {"Lighting","EnvironmentSpecularScale","Value"})
-            bindToggle(G, "KH_Lighting_Enabled_230", "Fog", {"Lighting","Fog","Enabled"})
-            bindColor(G, "KH_Lighting_Color_231", "Color", {"Lighting","Fog","Color"})
-            bindSlider(G, "KH_Lighting_Start_232", "Fog Start", 0.0, 10000.0, 0, {"Lighting","Fog","Start"})
-            bindSlider(G, "KH_Lighting_End_233", "Fog End", 0.0, 10000.0, 0, {"Lighting","Fog","End"})
+            local G = Tab:AddLeftGroupbox("color correction / atmosphere")
+            bindToggle(G, "UE_CC_Enabled",     "enabled",     {"ColorCorrection","Enabled"})
+            bindSlider(G, "UE_CC_Saturation",  "saturation", -1.0, 1.0, 2, {"ColorCorrection","Saturation"})
+            bindSlider(G, "UE_CC_Contrast",    "contrast",   -1.0, 1.0, 2, {"ColorCorrection","Contrast"})
+            bindSlider(G, "UE_CC_Brightness",  "brightness", -1.0, 1.0, 2, {"ColorCorrection","Brightness"})
         end)
         pcall(function()
-            local G = Tab:AddRightGroupbox("Weather")
-            bindToggle(G, "KH_Weather_Enabled_234", "Enable Weather", {"Weather","Enabled"})
-            bindColor(G, "KH_Weather_Color_235", "Color", {"Weather","Color"})
-            bindDropdownDynamic(G, "KH_Weather_Preset_236", "Preset", opts_weather_presets, false, {"Weather","Preset"})
-            bindSlider(G, "KH_Weather_Intensity_237", "Intensity", 0.0, 2.0, 2, {"Weather","Intensity"})
-            bindSlider(G, "KH_Weather_Rate_238", "Rate", 0.0, 3.0, 2, {"Weather","Rate"})
-            bindSlider(G, "KH_Weather_Height_239", "Height", 10.0, 100.0, 0, {"Weather","Height"})
-            bindSlider(G, "KH_Weather_Speed_240", "Speed", 0.5, 3.0, 2, {"Weather","Speed"})
-            bindSlider(G, "KH_Weather_Glow_241", "Glow", 0.0, 1.0, 2, {"Weather","Glow"})
-            bindSlider(G, "KH_Weather_Size_242", "Size", 0.5, 2.0, 2, {"Weather","Size"})
-            bindSlider(G, "KH_Weather_Spread_243", "Spread", 0.0, 3.0, 2, {"Weather","Spread"})
-            bindSlider(G, "KH_Weather_Strength_244", "Wind Strength", 0.0, 20.0, 1, {"Weather","Wind","Strength"})
-            bindSlider(G, "KH_Weather_Angle_245", "Wind Angle", 0.0, 360.0, 0, {"Weather","Wind","Angle"})
+            local G = Tab:AddLeftGroupbox("lighting")
+            bindToggle(G, "UE_LT_Ambient",       "Ambient",            {"Lighting","Ambient","Enabled"})
+            bindToggle(G, "UE_LT_CSBottom",      "ColorShift_Bottom",  {"Lighting","ColorShiftBottom","Enabled"})
+            bindToggle(G, "UE_LT_CSTop",         "ColorShift_Top",     {"Lighting","ColorShiftTop","Enabled"})
+            bindToggle(G, "UE_LT_FogColor",      "FogColor",           {"Lighting","FogColor","Enabled"})
+            bindSlider(G, "UE_LT_FogEnd",        "FogEnd",       0.0, 2000.0, 0, {"Lighting","FogEnd"},   {suffix="studs"})
+            bindSlider(G, "UE_LT_FogStart",      "FogStart",     0.0, 2000.0, 0, {"Lighting","FogStart"}, {suffix="studs"})
+            bindSlider(G, "UE_LT_ExposureComp",  "ExposureCompensation", -3.0, 3.0, 2, {"Lighting","ExposureCompensation"})
+            bindSlider(G, "UE_LT_Brightness",    "Brightness",   0.0, 3.0, 2,    {"Lighting","Brightness"})
+            bindSlider(G, "UE_LT_ClockTime",     "ClockTime",    0.0, 24.0, 2,    {"Lighting","ClockTime"}, {suffix="h"})
+            bindToggle(G, "UE_LT_GlobalShadows", "GlobalShadows",      {"Lighting","GlobalShadows"})
+            bindDropdown(G,"UE_LT_Technology",   "Technology",   {"Compatibility","Voxel","ShadowMap","Future"}, false, {"Lighting","Technology"})
+        end)
+
+        pcall(function()
+            local G = Tab:AddRightGroupbox("skybox / weather / ambience")
+            bindToggle(G, "UE_SK_Enabled",    "enabled",   {"Skybox","Enabled"})
+            bindDropdown(G,"UE_SK_Selected",  "selected",  opts_skybox_presets(), false, {"Skybox","Preset"})
         end)
         pcall(function()
-            local G = Tab:AddLeftGroupbox("Atmosphere")
-            bindToggle(G, "KH_Atmosphere_Enabled_246", "Atmosphere", {"Atmosphere","Enabled"})
-            bindColor(G, "KH_Atmosphere_Color_247", "Color", {"Atmosphere","Color"})
-            bindColor(G, "KH_Atmosphere_Decay_248", "Decay", {"Atmosphere","Decay"})
-            bindSlider(G, "KH_Atmosphere_Density_249", "Density", 0.0, 1.0, 2, {"Atmosphere","Density"})
-            bindSlider(G, "KH_Atmosphere_Offset_250", "Offset", 0.0, 1.0, 2, {"Atmosphere","Offset"})
-            bindSlider(G, "KH_Atmosphere_Glare_251", "Glare", 0.0, 1.0, 2, {"Atmosphere","Glare"})
-            bindSlider(G, "KH_Atmosphere_Haze_252", "Haze", 0.0, 1.0, 2, {"Atmosphere","Haze"})
+            local G = Tab:AddRightGroupbox("bloom / sun rays")
+            bindToggle(G, "UE_BL_Enabled",   "enable",          {"Bloom","Enabled"})
+            bindSlider(G, "UE_BL_Intensity", "intensity",    0.0, 10.0, 2, {"Bloom","Intensity"})
+            bindSlider(G, "UE_BL_Size",      "size",         0.0, 200.0, 0, {"Bloom","Size"})
+            bindSlider(G, "UE_BL_Threshold", "threshold",    0.0, 10.0, 2, {"Bloom","Threshold"})
         end)
         pcall(function()
-            local G = Tab:AddRightGroupbox("Skybox")
-            bindToggle(G, "KH_Skybox_Enabled_253", "Enable Skybox", {"Skybox","Enabled"})
-            bindDropdownDynamic(G, "KH_Skybox_Preset_254", "Preset", opts_skybox_presets, false, {"Skybox","Preset"})
+            local G = Tab:AddRightGroupbox("camera")
+            bindToggle(G,  "UE_CAM_AntiFlash",  "anti flashbang", {"Camera","AntiFlashbang"})
+            bindToggle(G,  "UE_CAM_FovChanger", "fov changer",    {"Camera","FovEnabled"})
+            bindSlider(G,  "UE_CAM_Fov",        "fov",          40.0, 120.0, 0, {"Camera","Fov"})
+            bindToggle(G,  "UE_CAM_AspectEnable","aspect ratio",  {"Camera","Aspect","Enabled"})
+            bindSlider(G,  "UE_CAM_AspectX",    "ratio x",      1.0, 32.0, 0, {"Camera","Aspect","X"})
+            bindSlider(G,  "UE_CAM_AspectY",    "ratio y",      1.0, 32.0, 0, {"Camera","Aspect","Y"})
+            bindSlider(G,  "UE_CAM_Blur",       "blur",         0.0, 50.0, 0, {"Camera","Blur"}, {suffix="x"})
         end)
+        -- Post Processing (from KH World)
         pcall(function()
-            local G = Tab:AddLeftGroupbox("Ambience")
-            bindToggle(G, "KH_Ambience_Enabled_255", "Enable Ambient Sound", {"Ambience","Enabled"})
-            bindDropdownDynamic(G, "KH_Ambience_Sound_256", "Preset", opts_ambience_sounds, false, {"Ambience","Sound"})
-            bindInput(G, "KH_Ambience_CustomSound_257", "Custom Sound (ID or URL)", {"Ambience","CustomSound"})
-            bindSlider(G, "KH_Ambience_Volume_258", "Volume", 0.0, 10.0, 2, {"Ambience","Volume"})
-        end)
-        pcall(function()
-            local G = Tab:AddRightGroupbox("Bloom")
-            bindToggle(G, "KH_Bloom_Enabled_259", "Bloom", {"Bloom","Enabled"})
-            bindSlider(G, "KH_Bloom_Intensity_260", "Intensity", 0.0, 1.0, 2, {"Bloom","Intensity"})
-            bindSlider(G, "KH_Bloom_Size_261", "Size", 0.0, 56.0, 0, {"Bloom","Size"})
-            bindSlider(G, "KH_Bloom_Threshold_262", "Threshold", 0.0, 5.0, 2, {"Bloom","Threshold"})
-        end)
-        pcall(function()
-            local G = Tab:AddLeftGroupbox("SunRays")
-            bindToggle(G, "KH_SunRays_Enabled_263", "Sun Rays", {"SunRays","Enabled"})
-            bindSlider(G, "KH_SunRays_Intensity_264", "Intensity", 0.0, 1.0, 2, {"SunRays","Intensity"})
-            bindSlider(G, "KH_SunRays_Spread_265", "Spread", 0.0, 1.0, 2, {"SunRays","Spread"})
-        end)
-        pcall(function()
-            local G = Tab:AddRightGroupbox("DepthOfField")
-            bindToggle(G, "KH_DepthOfField_Enabled_266", "Depth of Field", {"DepthOfField","Enabled"})
-            bindSlider(G, "KH_DepthOfField_FarIntensity_267", "Far Intensity", 0.0, 1.0, 2, {"DepthOfField","FarIntensity"})
-            bindSlider(G, "KH_DepthOfField_FocusDistance_268", "Focus Distance", 0.0, 1000.0, 0, {"DepthOfField","FocusDistance"})
-            bindSlider(G, "KH_DepthOfField_InFocusRadius_269", "In Focus Radius", 0.0, 500.0, 0, {"DepthOfField","InFocusRadius"})
-            bindSlider(G, "KH_DepthOfField_NearIntensity_270", "Near Intensity", 0.0, 1.0, 2, {"DepthOfField","NearIntensity"})
-        end)
-        pcall(function()
-            local G = Tab:AddLeftGroupbox("MotionBlur")
-            bindToggle(G, "KH_MotionBlur_Enabled_271", "Motion Blur", {"MotionBlur","Enabled"})
-            bindSlider(G, "KH_MotionBlur_Intensity_272", "Intensity", 0.0, 56.0, 2, {"MotionBlur","Intensity"})
-            bindSlider(G, "KH_MotionBlur_Sensitivity_273", "Sensitivity", 0.0, 5.0, 2, {"MotionBlur","Sensitivity"})
-        end)
-        pcall(function()
-            local G = Tab:AddRightGroupbox("StretchedResolution")
-            bindToggle(G, "KH_StretchedResolution_Enabled_274", "Enable Stretched Resolution", {"StretchedResolution","Enabled"})
-            bindSlider(G, "KH_StretchedResolution_X_275", "X Scale", 0.01, 1.0, 2, {"StretchedResolution","X"})
-            bindSlider(G, "KH_StretchedResolution_Y_276", "Y Scale", 0.01, 1.0, 2, {"StretchedResolution","Y"})
-        end)
-        pcall(function()
-            local G = Tab:AddLeftGroupbox("ColorCorrection")
-            bindToggle(G, "KH_ColorCorrection_Enabled_277", "Color Correction", {"ColorCorrection","Enabled"})
-            bindColor(G, "KH_ColorCorrection_TintColor_278", "TintColor", {"ColorCorrection","TintColor"})
-            bindSlider(G, "KH_ColorCorrection_Saturation_279", "Saturation", -1.0, 1.0, 2, {"ColorCorrection","Saturation"})
-            bindSlider(G, "KH_ColorCorrection_Brightness_280", "Brightness", -1.0, 1.0, 2, {"ColorCorrection","Brightness"})
-            bindSlider(G, "KH_ColorCorrection_Contrast_281", "Contrast", -1.0, 1.0, 2, {"ColorCorrection","Contrast"})
-        end)
-        pcall(function()
-            local G = Tab:AddRightGroupbox("ColorGrading")
-            bindToggle(G, "KH_ColorGrading_Enabled_282", "Color Grading", {"ColorGrading","Enabled"})
-            bindDropdownDynamic(G, "KH_ColorGrading_TonemapperPreset_283", "Preset", opts_tonemappers, false, {"ColorGrading","TonemapperPreset"})
+            local G = Tab:AddLeftGroupbox("post processing")
+            bindToggle(G, "UE_PP_Enabled",      "enabled",     {"PostProcessing","Enabled"})
+            bindToggle(G, "UE_PP_Bloom",        "bloom",       {"PostProcessing","Bloom","Enabled"})
+            bindToggle(G, "UE_PP_DOF",          "depth of field", {"PostProcessing","DepthOfField","Enabled"})
+            bindToggle(G, "UE_PP_MotionBlur",   "motion blur", {"PostProcessing","MotionBlur","Enabled"})
+            bindToggle(G, "UE_PP_ColorGrade",   "color grading", {"PostProcessing","ColorGrading","Enabled"})
+            bindSlider(G, "UE_PP_Intensity",    "intensity",  0.0, 5.0, 2, {"PostProcessing","Intensity"})
         end)
     end)
 
-    -- =============== Tab: player ===============
+    -- ====== Tab: esp ======
     pcall(function()
-        local Tab = Window:AddTab("player")
+        local Tab = Window:AddTab("esp")
+
         pcall(function()
-            local G = Tab:AddLeftGroupbox("Movement")
-            bindSlider(G, "KH_Movement_Speed_284", "Speed", 0, 100, 0, {"Movement","Speed"})
-            bindDropdown(G, "KH_Movement_Mode_285", "Mode", {"Under Feet","Camera Look"}, false, {"Movement","LongJump","Mode"})
-            bindSlider(G, "KH_Movement_Force_286", "Force", 0.0, 300.0, 0, {"Movement","LongJump","Force"})
-            bindSlider(G, "KH_Movement_UpwardVelocity_287", "Upward Velocity", 0.0, 200.0, 0, {"Movement","LongJump","UpwardVelocity"})
-            bindSlider(G, "KH_Movement_Behind_288", "Behind Offset", 0.0, 8.0, 1, {"Movement","LongJump","Behind"})
-            bindToggle(G, "KH_Movement_Enabled_289", "Enable Movement Recorder", {"Movement","MovementRecorder","Enabled"})
-            bindToggle(G, "KH_Movement_HideUI_290", "Hide Recorder UI", {"Movement","MovementRecorder","HideUI"})
-            bindToggle(G, "KH_Movement_HideNotifications_291", "Hide Recorder Notifications", {"Movement","MovementRecorder","HideNotifications"})
-            bindSlider(G, "KH_Movement_OpenDistance_292", "Open Distance", 1.0, 25.0, 1, {"Movement","MovementRecorder","OpenDistance"})
-            bindSlider(G, "KH_Movement_RenderDistance_293", "Render Distance", 10.0, 250.0, 0, {"Movement","MovementRecorder","RenderDistance"})
-            bindSlider(G, "KH_Movement_LookAlignSpeed_294", "Look Align Speed", 45.0, 720.0, 0, {"Movement","MovementRecorder","LookAlignSpeed"})
-            bindSlider(G, "KH_Movement_LookSmoothing_295", "Look Smoothness", 0.0, 100.0, 0, {"Movement","MovementRecorder","LookSmoothing"})
-            bindSlider(G, "KH_Movement_AlignSnapDistance_296", "Align Snap Distance", 0.1, 5.0, 1, {"Movement","MovementRecorder","AlignSnapDistance"})
+            local G = Tab:AddLeftGroupbox("player options")
+            bindToggle(G, "UE_ESP_Box",          "box",              {"Esp","Player","Box","Enabled"})
+            bindToggle(G, "UE_ESP_MoveRot",      "moving rotation",  {"Esp","Player","Box","MovingRotation"})
+            bindSlider(G, "UE_ESP_BoxRot",       "rotation",       0.0, 360.0, 0, {"Esp","Player","Box","Rotation"}, {suffix="°"})
+            bindSlider(G, "UE_ESP_BoxSpeed",     "speed",          0.0, 5.0, 2,    {"Esp","Player","Box","Speed"},    {suffix="rps"})
+            bindToggle(G, "UE_ESP_Fill",         "fill",             {"Esp","Player","Fill","Enabled"})
+            bindToggle(G, "UE_ESP_Skeleton",     "skeleton",         {"Esp","Player","Skeleton","Enabled"})
+            bindToggle(G, "UE_ESP_Outline",      "outline",          {"Esp","Player","Outline","Enabled"})
+            bindSlider(G, "UE_ESP_OutlineThick", "thickness",      0.5, 10.0, 1, {"Esp","Player","Outline","Thickness"}, {suffix="px"})
+            bindToggle(G, "UE_ESP_Name",         "name",             {"Esp","Player","Name","Enabled"})
+            bindSlider(G, "UE_ESP_NameRot",      "rotation",       0.0, 360.0, 0, {"Esp","Player","Name","Rotation"}, {suffix="°"})
+            bindToggle(G, "UE_ESP_Weapon",       "weapon",           {"Esp","Player","Weapon","Enabled"})
+            bindToggle(G, "UE_ESP_Distance",     "distance",         {"Esp","Player","Distance","Enabled"})
+            bindToggle(G, "UE_ESP_HealthBar",    "healthbar",        {"Esp","Player","HealthBar","Enabled"})
+            bindToggle(G, "UE_ESP_ResizeOutline","resize outline",   {"Esp","Player","Outline","Resize"})
+            bindToggle(G, "UE_ESP_MovingHealth", "moving healthbar", {"Esp","Player","HealthBar","Moving"})
+            bindDropdown(G,"UE_ESP_HBType",      "healthbar type",   {"gradient","segmented","smooth"}, false, {"Esp","Player","HealthBar","Type"})
+            bindSlider(G, "UE_ESP_HBSlices",     "slices",         1.0, 20.0, 0, {"Esp","Player","HealthBar","Slices"})
+            bindSlider(G, "UE_ESP_HBSpeed",      "speed",          0.0, 5.0, 2, {"Esp","Player","HealthBar","Speed"})
+            bindSlider(G, "UE_ESP_HBLerp",       "health lerp",    0.0, 1.0, 2, {"Esp","Player","HealthBar","Lerp"})
         end)
         pcall(function()
-            local G = Tab:AddRightGroupbox("AnimationPlayer")
-            bindToggle(G, "KH_AnimationPlayer_Enabled_297", "Enable Animation Player", {"AnimationPlayer","Enabled"})
-            bindDropdownDynamic(G, "KH_AnimationPlayer_Animation_298", "Animation", opts_animations, false, {"AnimationPlayer","Animation"})
-            bindInput(G, "KH_AnimationPlayer_CustomId_299", "Custom Animation ID", {"AnimationPlayer","CustomId"})
-            bindSlider(G, "KH_AnimationPlayer_Speed_300", "Speed", 0.0, 5.0, 2, {"AnimationPlayer","Speed"})
-            bindSlider(G, "KH_AnimationPlayer_Start_301", "Start", 0.0, 100.0, 0, {"AnimationPlayer","Start"})
-            bindSlider(G, "KH_AnimationPlayer_End_302", "End", 0.0, 100.0, 0, {"AnimationPlayer","End"})
+            local G = Tab:AddLeftGroupbox("world options")
+            bindToggle(G, "UE_ESPW_Name",      "name",         {"Esp","World","Name"})
+            bindToggle(G, "UE_ESPW_Image",     "image",        {"Esp","World","Image"})
+            bindToggle(G, "UE_ESPW_Distance",  "distance",     {"Esp","World","Distance"})
+            bindSlider(G, "UE_ESPW_Scale",     "object scale", 10.0, 300.0, 0, {"Esp","World","ObjectScale"}, {suffix="%"})
+            bindDropdown(G,"UE_ESPW_Whitelist", "whitelist",    {"Grenade","Molotov","Satchel","All"}, true, {"Esp","World","Whitelist"})
+        end)
+
+        pcall(function()
+            local G = Tab:AddRightGroupbox("override appearance")
+            bindToggle(G, "UE_OA_Enabled",   "enabled",   {"OverrideAppearance","Enabled"})
+            bindToggle(G, "UE_OA_Material",  "material",  {"OverrideAppearance","Material","Enabled"})
+            bindToggle(G, "UE_OA_Color",     "color",     {"OverrideAppearance","Color","Enabled"})
+            bindDropdown(G,"UE_OA_Decals",   "decals, clothing", {"keep","hide","replace"}, false, {"OverrideAppearance","Decals"})
+            bindSlider(G, "UE_OA_Transp",    "transparency", 0.0, 100.0, 0, {"OverrideAppearance","Transparency"}, {suffix="%"})
         end)
         pcall(function()
-            local G = Tab:AddLeftGroupbox("ItemModifiers")
-            bindToggle(G, "KH_ItemModifiers_Enabled_303", "Enabled", {"ItemModifiers","Enabled"})
-            bindSlider(G, "KH_ItemModifiers_Percentage_304", "Percentage", 0, 100, 0, {"ItemModifiers","Percentage"})
-            bindToggle(G, "KH_ItemModifiers_NoSpread_305", "Remove Spread", {"ItemModifiers","NoSpread"})
-            bindToggle(G, "KH_ItemModifiers_AutomaticWeapon_306", "Automatic Fire", {"ItemModifiers","AutomaticWeapon"})
-            bindToggle(G, "KH_ItemModifiers_AlwaysBackstab_307", "Always Backstab", {"ItemModifiers","AlwaysBackstab"})
-            bindToggle(G, "KH_ItemModifiers_Enabled_308", "Extend Melee Range", {"ItemModifiers","ExtendMeleeRange","Enabled"})
-            bindSlider(G, "KH_ItemModifiers_Range_309", "Range", 5.0, 20.0, 0, {"ItemModifiers","ExtendMeleeRange","Range"})
-            bindToggle(G, "KH_ItemModifiers_Enabled_310", "Fuse Override", {"ItemModifiers","GrenadeFuse","Enabled"})
-            bindDropdown(G, "KH_ItemModifiers_ExplodeOn_311", "Explode On", {"Impact","Throw"}, false, {"ItemModifiers","GrenadeFuse","ExplodeOn"})
-            bindToggle(G, "KH_ItemModifiers_RemoveFuse_312", "Remove Fuse", {"ItemModifiers","GrenadeFuse","RemoveFuse"})
-            bindToggle(G, "KH_ItemModifiers_InfiniteDoubleJumps_313", "Infinite Double Jumps", {"ItemModifiers","InfiniteDoubleJumps"})
-            bindToggle(G, "KH_ItemModifiers_NoShootAnimation_314", "Hide Shoot Animation", {"ItemModifiers","NoShootAnimation"})
-            bindToggle(G, "KH_ItemModifiers_NoSprintAnimation_315", "Hide Sprint Animation", {"ItemModifiers","NoSprintAnimation"})
-            bindToggle(G, "KH_ItemModifiers_NoEquipAnimation_316", "Hide Equip Animation", {"ItemModifiers","NoEquipAnimation"})
-            bindToggle(G, "KH_ItemModifiers_NoReloadAnimation_317", "Hide Reload Animation", {"ItemModifiers","NoReloadAnimation"})
-            bindToggle(G, "KH_ItemModifiers_NoMotion_318", "Remove Weapon Motion", {"ItemModifiers","NoMotion"})
-            bindToggle(G, "KH_ItemModifiers_NoCameraShake_319", "Remove Camera Shake", {"ItemModifiers","NoCameraShake"})
-            bindToggle(G, "KH_ItemModifiers_NoCameraSway_320", "Remove Camera Sway", {"ItemModifiers","NoCameraSway"})
+            local G = Tab:AddRightGroupbox("highlight / effects")
+            bindToggle(G, "UE_HL_Enabled",      "enabled",            {"Highlight","Enabled"})
+            bindSlider(G, "UE_HL_FillTransp",   "fill transparency",  0.0, 10.0, 2, {"Highlight","FillTransparency"})
+            bindSlider(G, "UE_HL_OutlineTransp","outline transparency", 0.0, 10.0, 2, {"Highlight","OutlineTransparency"})
+            bindDropdown(G,"UE_HL_Settings",    "highlight settings",  {"Default","Strong","Subtle"}, false, {"Highlight","Settings"})
+        end)
+        pcall(function()
+            local G = Tab:AddRightGroupbox("customization")
+            bindToggle(G, "UE_CS_Teammates",  "include teammates",  {"Esp","IncludeTeammates"})
+            bindDropdown(G,"UE_CS_Bounding",  "bounding mode",      {"fixed","dynamic","head"}, false, {"Esp","BoundingMode"})
+            bindSlider(G, "UE_CS_FixedWidth", "fixed width scale",  10.0, 300.0, 0, {"Esp","FixedWidthScale"}, {suffix="%"})
+            bindDropdown(G,"UE_CS_Font",      "font",               {"proggy clean","firacode","consolas"}, false, {"Esp","Font"})
+            bindDropdown(G,"UE_CS_NameType",  "name type",          {"Name","DisplayName","UserId"}, false, {"Esp","NameType"})
         end)
     end)
 
-    -- =============== Tab: auto ===============
+    -- ====== Tab: visuals ======
     pcall(function()
-        local Tab = Window:AddTab("auto")
+        local Tab = Window:AddTab("visuals")
+
         pcall(function()
-            local G = Tab:AddLeftGroupbox("AutoLoadout")
-            bindToggle(G, "KH_AutoLoadout_Enabled_321", "Enabled", {"AutoLoadout","Enabled"})
-            bindToggle(G, "KH_AutoLoadout_PerMap_322", "Use Map-Specific Loadouts", {"AutoLoadout","PerMap"})
-            bindToggle(G, "KH_AutoLoadout_MultipleLoadouts_323", "Use Fallback Loadouts", {"AutoLoadout","MultipleLoadouts"})
+            local G = Tab:AddLeftGroupbox("viewmodel / item")
+            bindDropdown(G,"UE_VM_Disable",    "disable",       {"keep","hide","item only"}, false, {"ViewModel","Disable"})
+            bindToggle(G,  "UE_VM_OverrideFps","override fps",  {"ViewModel","OverrideFps"})
+            bindSlider(G,  "UE_VM_Fps",        "fps",         1.0, 120.0, 0, {"ViewModel","Fps"})
+            bindSlider(G,  "UE_VM_Recoil",     "recoil percent", 0.0, 100.0, 0, {"ViewModel","RecoilPercent"}, {suffix="%"})
+            bindToggle(G,  "UE_VM_Chams",      "chams",         {"ViewModel","Chams"})
+            bindToggle(G,  "UE_VM_Offset",     "offset",        {"ViewModel","Offset","Enabled"})
+            bindToggle(G,  "UE_VM_ShowCos",    "show cosmetics changer", {"ViewModel","ShowCosmeticsChanger"})
         end)
         pcall(function()
-            local G = Tab:AddRightGroupbox("AutoBan")
-            bindToggle(G, "KH_AutoBan_Enabled_324", "Enabled", {"AutoBan","Enabled"})
-            bindDropdownDynamic(G, "KH_AutoBan_FirstWeapons_325", "First Ban Choices", opts_weapons, true, {"AutoBan","FirstWeapons"})
-            bindDropdownDynamic(G, "KH_AutoBan_SecondWeapons_326", "Second Ban Choices", opts_weapons, true, {"AutoBan","SecondWeapons"})
+            local G = Tab:AddLeftGroupbox("custom tracers / shoot sound")
+            bindToggle(G, "UE_CT_Enabled", "enabled", {"CustomTracers","Enabled"})
         end)
         pcall(function()
-            local G = Tab:AddLeftGroupbox("AutoVote")
-            bindToggle(G, "KH_AutoVote_Enabled_327", "Enabled", {"AutoVote","Enabled"})
-            bindDropdownDynamic(G, "KH_AutoVote_Maps_328", "Maps to Vote For", opts_maps, true, {"AutoVote","Maps"})
+            local G = Tab:AddLeftGroupbox("crosshair")
+            bindToggle(G, "UE_CR_Enabled",      "enabled",             {"CustomCrosshair","Enabled"})
+            bindToggle(G, "UE_CR_DisableGame",  "disable game crosshair", {"CustomCrosshair","DisableGame"})
+        end)
+
+        pcall(function()
+            local G = Tab:AddRightGroupbox("hit effects / hit sounds")
+            bindToggle(G, "UE_HE_Enabled",     "enabled",               {"PlayerHit","Enabled"})
+            bindToggle(G, "UE_HE_DisableMark", "disable hit marker",    {"PlayerHit","DisableHitMarker"})
+            bindToggle(G, "UE_HE_DisableNums", "disable damage numbers", {"PlayerHit","DisableDamageNumbers"})
         end)
         pcall(function()
-            local G = Tab:AddRightGroupbox("AutoQueue")
-            bindToggle(G, "KH_AutoQueue_Enabled_329", "Enabled", {"AutoQueue","Enabled"})
-            bindDropdownDynamic(G, "KH_AutoQueue_Queue_330", "Queue", opts_queues, false, {"AutoQueue","Queue"})
+            local G = Tab:AddRightGroupbox("indicators")
+            bindToggle(G, "UE_IN_Manip",   "manipulated",   {"Indicators","Manipulated"})
+            bindToggle(G, "UE_IN_Ragebot", "ragebot",       {"Indicators","Ragebot"})
+            bindToggle(G, "UE_IN_Ammo",    "ammo",          {"Indicators","Ammo"})
+            bindSlider(G, "UE_IN_Lerp",    "lerp",        0.0, 2.0, 2, {"Indicators","Lerp"}, {suffix="x"})
+            bindSlider(G, "UE_IN_OffsetX", "offset x",   -500.0, 500.0, 0, {"Indicators","OffsetX"}, {suffix="px"})
+            bindSlider(G, "UE_IN_OffsetY", "offset y",   -500.0, 500.0, 0, {"Indicators","OffsetY"}, {suffix="px"})
+            bindDropdown(G,"UE_IN_Font",   "font",     {"proggy clean","firacode","consolas"}, false, {"Indicators","Font"})
+            bindDropdown(G,"UE_IN_TextStyle","text style", {"lower","upper","sentence"}, false, {"Indicators","TextStyle"})
+            bindDropdown(G,"UE_IN_Position","position", {"top left","top right","bottom left","bottom right"}, false, {"Indicators","Position"})
         end)
         pcall(function()
-            local G = Tab:AddLeftGroupbox("AutoRespawn")
-            bindToggle(G, "KH_AutoRespawn_Enabled_331", "Enabled", {"AutoRespawn","Enabled"})
+            local G = Tab:AddRightGroupbox("target")
+            bindToggle(G, "UE_TR_Tracer",     "tracer",    {"Target","Tracer","Enabled"})
+            bindToggle(G, "UE_TR_Highlight",  "highlight", {"Target","Highlight","Enabled"})
         end)
+        -- Sound ESP (from KH Visuals)
         pcall(function()
-            local G = Tab:AddRightGroupbox("AutoPickupDrops")
-            bindToggle(G, "KH_AutoPickupDrops_Enabled_332", "Enabled", {"AutoPickupDrops","Enabled"})
-            bindDropdownDynamic(G, "KH_AutoPickupDrops_Types_333", "Pickup Types", opts_pickup_types, true, {"AutoPickupDrops","Types"})
+            local G = Tab:AddLeftGroupbox("sound esp")
+            bindToggle(G,  "UE_SE_Enabled",   "enabled",      {"SoundVisualizer","Enabled"})
+            bindToggle(G,  "UE_SE_Steps",     "footsteps",    {"SoundVisualizer","Footsteps"})
+            bindDropdown(G,"UE_SE_Source",    "source",     {"All","Enemies","Team","Self"}, false, {"SoundVisualizer","Source"})
+            bindSlider(G,  "UE_SE_Duration",  "duration",   0.1, 5.0, 2, {"SoundVisualizer","Duration"}, {suffix="s"})
+            bindSlider(G,  "UE_SE_MinLoud",   "min loudness", 0.0, 1.0, 2, {"SoundVisualizer","MinLoudness"})
         end)
+        -- Weapon Visuals detailed (from KH Visuals)
         pcall(function()
-            local G = Tab:AddLeftGroupbox("AntiKatana")
-            bindToggle(G, "KH_AntiKatana_Enabled_334", "Enabled", {"AntiKatana","Enabled"})
-        end)
-        pcall(function()
-            local G = Tab:AddRightGroupbox("SubspaceTripmines")
-            bindToggle(G, "KH_SubspaceTripmines_AutoTrigger_335", "Auto Trigger", {"SubspaceTripmines","AutoTrigger"})
-            bindToggle(G, "KH_SubspaceTripmines_TeamTrigger_336", "Team Trigger", {"SubspaceTripmines","TeamTrigger"})
+            local G = Tab:AddRightGroupbox("weapon visuals")
+            bindToggle(G, "UE_WV_Enabled",       "enabled",            {"WeaponVisuals","Enabled"})
+            bindToggle(G, "UE_WV_ViewOffset",    "viewmodel offset",    {"WeaponVisuals","ViewOffset"})
+            bindToggle(G, "UE_WV_Wireframe",     "wireframe",           {"WeaponVisuals","Wireframe"})
+            bindDropdown(G,"UE_WV_Material",     "material",          {"default","smooth","glass","glow"}, false, {"WeaponVisuals","Material"})
+            bindToggle(G, "UE_WV_BulletTracer",  "bullet tracers",      {"BulletTracers","Enabled"})
         end)
     end)
 
-    -- =============== Tab: detect ===============
+    -- ====== Tab: character ======
     pcall(function()
-        local Tab = Window:AddTab("detect")
+        local Tab = Window:AddTab("character")
+
         pcall(function()
-            local G = Tab:AddLeftGroupbox("HackerDetector")
-            bindToggle(G, "KH_HackerDetector_Enabled_337", "Enabled", {"HackerDetector","Enabled"})
-            bindToggle(G, "KH_HackerDetector_Notify_338", "Notify", {"HackerDetector","Notify"})
-            bindColor(G, "KH_HackerDetector_Color_339", "Text Color", {"HackerDetector","Color"})
+            local G = Tab:AddLeftGroupbox("movement")
+            bindToggle(G, "UE_MV_Velocity",       "velocity",            {"Movement","Velocity","Enabled"})
+            bindSlider(G, "UE_MV_VelSpeed",       "velocity speed",     0.0, 500.0, 0, {"Movement","Velocity","Speed"}, {suffix="s"})
+            bindToggle(G, "UE_MV_SlideBoost",     "slide boost",         {"Movement","SlideBoost","Enabled"})
+            bindSlider(G, "UE_MV_SlideAmt",       "slide boost",       1.0, 5.0, 2, {"Movement","SlideBoost","Amount"}, {suffix="x"})
+            bindToggle(G, "UE_MV_DoubleJumpH",    "double jump height",  {"Movement","DoubleJumpHeight","Enabled"})
+            bindSlider(G, "UE_MV_DJHeightAmt",    "double jump height", 1.0, 5.0, 2, {"Movement","DoubleJumpHeight","Amount"}, {suffix="x"})
+            bindToggle(G, "UE_MV_InfiniteJump",   "infinite double jump", {"Movement","InfiniteDoubleJump"})
         end)
         pcall(function()
-            local G = Tab:AddRightGroupbox("ModDetector")
-            bindToggle(G, "KH_ModDetector_Enabled_340", "Enabled", {"ModDetector","Enabled"})
-            bindDropdownDynamic(G, "KH_ModDetector_Moderators_341", "Moderator Responses", opts_mod_actions, true, {"ModDetector","Moderators"})
-            bindDropdownDynamic(G, "KH_ModDetector_ModFriends_342", "Mod Friends", opts_mod_actions, true, {"ModDetector","ModFriends"})
-            bindColor(G, "KH_ModDetector_Color_343", "Text Color", {"ModDetector","Color"})
+            local G = Tab:AddLeftGroupbox("animation player")
+            bindToggle(G,  "UE_AP_Enabled",   "enabled",          {"AnimationPlayer","Enabled"})
+            bindDropdown(G,"UE_AP_Animation", "animation",      {"floss","wave","salute","dance","sit"}, false, {"AnimationPlayer","Animation"})
+            bindSlider(G,  "UE_AP_Speed",     "speed",          0.1, 5.0, 1, {"AnimationPlayer","Speed"})
+            bindSlider(G,  "UE_AP_Start",     "start",          0.0, 100.0, 0, {"AnimationPlayer","StartPct"}, {suffix="%"})
+            bindSlider(G,  "UE_AP_End",       "end",            0.0, 100.0, 0, {"AnimationPlayer","EndPct"},   {suffix="%"})
+        end)
+
+        pcall(function()
+            local G = Tab:AddRightGroupbox("character")
+            bindToggle(G, "UE_CH_Noclip",   "noclip",      {"Character","Noclip","Enabled"})
+            bindToggle(G, "UE_CH_Fly",      "fly",         {"Character","Fly","Enabled"})
+            bindSlider(G, "UE_CH_FlySpeed", "fly speed", 0.0, 500.0, 0, {"Character","Fly","Speed"}, {suffix="s"})
+        end)
+        pcall(function()
+            local G = Tab:AddRightGroupbox("third person")
+            bindToggle(G, "UE_TP_Enabled", "enabled", {"ThirdPerson","Enabled"})
+        end)
+        pcall(function()
+            local G = Tab:AddRightGroupbox("anti aim")
+            bindToggle(G,  "UE_AA_Enabled", "enabled",   {"AntiAim","Enabled"})
+            bindDropdown(G,"UE_AA_Pitch",   "pitch",   {"disabled","look down","look up","zero"}, false, {"AntiAim","Pitch"})
+            bindDropdown(G,"UE_AA_Yaw",     "yaw",     {"disabled","backwards","spin","jitter","random"}, false, {"AntiAim","Yaw"})
+            bindToggle(G,  "UE_AA_Underground", "underground", {"AntiAim","Underground"})
+        end)
+        -- Movement Recorder (from KH Player)
+        pcall(function()
+            local G = Tab:AddLeftGroupbox("movement recorder")
+            bindToggle(G, "UE_MR_Enabled",   "enabled",     {"MovementRecorder","Enabled"})
+            bindToggle(G, "UE_MR_Loop",      "loop",        {"MovementRecorder","Loop"})
+            bindDropdown(G,"UE_MR_Route",    "route",     {"Default"}, false, {"MovementRecorder","Route"})
+            pcall(function() G:AddButton({ Text = "Start recording", Func = function()
+                pcall(function() _G.__QuantumStore:Set({"MovementRecorder","Command"}, "record") end)
+            end }) end)
+            pcall(function() G:AddButton({ Text = "Play back", Func = function()
+                pcall(function() _G.__QuantumStore:Set({"MovementRecorder","Command"}, "play") end)
+            end }) end)
+            pcall(function() G:AddButton({ Text = "Stop", Func = function()
+                pcall(function() _G.__QuantumStore:Set({"MovementRecorder","Command"}, "stop") end)
+            end }) end)
         end)
     end)
 
-    -- =============== Tab: spoof ===============
+    -- ====== Tab: misc ======
     pcall(function()
-        local Tab = Window:AddTab("spoof")
+        local Tab = Window:AddTab("misc")
+
         pcall(function()
-            local G = Tab:AddLeftGroupbox("DeviceSpoof")
-            bindToggle(G, "KH_DeviceSpoof_Enabled_344", "Enable Device Spoof", {"DeviceSpoof","Enabled"})
-            bindDropdown(G, "KH_DeviceSpoof_SpoofType_345", "Presented Platform", {"Default"}, false, {"DeviceSpoof","SpoofType"})
+            local G = Tab:AddLeftGroupbox("auto load")
+            bindToggle(G, "UE_AL_Enabled",    "enabled",     {"AutoLoadout","Enabled"})
+            bindToggle(G, "UE_AL_SilentMode", "silent mode", {"AutoLoadout","SilentMode"})
         end)
         pcall(function()
-            local G = Tab:AddRightGroupbox("UserServer")
-            bindToggle(G, "KH_UserServer_ShareSkins_346", "Share Skins", {"UserServer","ShareSkins"})
-            bindToggle(G, "KH_UserServer_ShowActive_347", "Show Active Cosmetics", {"UserServer","ShowActive"})
+            local G = Tab:AddLeftGroupbox("loadout")
+            bindToggle(G,  "UE_LD_AutoSelect","auto select",     {"AutoLoadout","AutoSelect"})
+            bindDropdown(G,"UE_LD_Primary",   "primary",         {"Assault Rifle","Sniper","Shotgun","SMG","Rifle"}, false, {"AutoLoadout","Primary"})
+            bindDropdown(G,"UE_LD_Secondary", "secondary",       {"Handgun","Revolver","Pistol"}, false, {"AutoLoadout","Secondary"})
+            bindDropdown(G,"UE_LD_Melee",     "melee",           {"Fists","Knife","Katana","Baseball Bat"}, false, {"AutoLoadout","Melee"})
+            bindDropdown(G,"UE_LD_Utility",   "utility",         {"Grenade","Molotov","Satchel","Smoke","Flash"}, false, {"AutoLoadout","Utility"})
+        end)
+        pcall(function()
+            local G = Tab:AddLeftGroupbox("chat spam")
+            bindToggle(G,  "UE_CS_Enabled",    "enabled",          {"ChatSpam","Enabled"})
+            bindToggle(G,  "UE_CS_InOrder",    "in order",         {"ChatSpam","InOrder"})
+            bindDropdown(G,"UE_CS_ChatMode",   "chat mode",      {"custom","global","team"}, false, {"ChatSpam","ChatMode"})
+            bindDropdown(G,"UE_CS_RandomText", "random custom text", {"Default"}, true, {"ChatSpam","RandomText"})
+        end)
+
+        pcall(function()
+            local G = Tab:AddRightGroupbox("auto queue / auto ban")
+            bindToggle(G,  "UE_AQ_Enabled",   "enabled",   {"AutoQueue","Enabled"})
+            bindDropdown(G,"UE_AQ_GameMode",  "Game Mode", {"2v2","3v3","4v4","1v1","FFA"}, false, {"AutoQueue","GameMode"})
+            bindToggle(G,  "UE_AB_Enabled2",  "auto ban",  {"AutoBan","Enabled"})
+        end)
+        pcall(function()
+            local G = Tab:AddRightGroupbox("name spoofer / spoof device")
+            bindToggle(G, "UE_NS_Enabled",     "enabled",     {"NameSpoofer","Enabled"})
+            bindDropdown(G,"UE_NS_Name",       "name",      {"Default"}, false, {"NameSpoofer","Name"})
+            bindToggle(G, "UE_DS_Enabled",     "spoof device", {"DeviceSpoof","Enabled"})
+        end)
+        pcall(function()
+            local G = Tab:AddRightGroupbox("arcade servers")
+            bindToggle(G, "UE_AS_GrabDrops", "automatically grab drops", {"AutoPickupDrops","Enabled"})
+            bindToggle(G, "UE_AS_Respawn",   "auto respawn",             {"AutoRespawn","Enabled"})
+        end)
+        pcall(function()
+            local G = Tab:AddRightGroupbox("notify hit")
+            bindToggle(G,  "UE_NH_Enabled",    "enabled",             {"NotifyHit","Enabled"})
+            bindSlider(G,  "UE_NH_Duration",   "notify duration",   0.1, 10.0, 1, {"NotifyHit","Duration"}, {suffix="s"})
+            bindToggle(G,  "UE_NH_Random",     "random notify text",  {"NotifyHit","RandomText"})
+            bindDropdown(G,"UE_NH_TextList",   "hit text",          {"hit {NAME} for {DMG} in the {PART}"}, false, {"NotifyHit","TextList"})
+        end)
+        -- Cosmetics (from KH Cosmetics)
+        pcall(function()
+            local G = Tab:AddLeftGroupbox("cosmetics")
+            bindToggle(G,  "UE_COS_Enabled",       "enabled",             {"Cosmetics","Enabled"})
+            bindToggle(G,  "UE_COS_UnlockAll",     "unlock all",          {"Cosmetics","UnlockAll"})
+            bindToggle(G,  "UE_COS_Reroll",        "reroll on equip",     {"Cosmetics","Reroll"})
+            bindDropdown(G,"UE_COS_Preset",        "preset",            {"Default"}, false, {"Cosmetics","Preset"})
+            pcall(function() G:AddButton({ Text = "Open cosmetic changer", Func = function()
+                pcall(function() _G.__QuantumStore:Set({"Cosmetics","ChangerOpen"}, true) end)
+            end }) end)
+            pcall(function() G:AddButton({ Text = "Share active look", Func = function()
+                pcall(function() _G.__QuantumStore:Set({"Cosmetics","Command"}, "share") end)
+            end }) end)
+        end)
+        -- Detection (from KH Automation > Detection)
+        pcall(function()
+            local G = Tab:AddRightGroupbox("detection")
+            bindToggle(G,  "UE_DT_Hacker",    "hacker detector",   {"HackerDetector","Enabled"})
+            bindToggle(G,  "UE_DT_HackerNotify","notify on hacker",  {"HackerDetector","Notify"})
+            bindToggle(G,  "UE_DT_Mod",       "mod detector",      {"ModDetector","Enabled"})
+            bindToggle(G,  "UE_DT_ModNotify", "notify on mod",     {"ModDetector","Notify"})
+            bindDropdown(G,"UE_DT_ModAction", "on mod detected",   {"nothing","leave","hide","spectator mode"}, false, {"ModDetector","Action"})
         end)
     end)
-
     -- =============== Tab: hvh ===============
     pcall(function()
         local Tab = Window:AddTab("hvh")
+        -- Master Enable (top-left so you can't miss it)
+        pcall(function()
+            local G = Tab:AddLeftGroupbox("Quantum Master")
+            local M = _G.__QuantumMaster
+            G:AddToggle("QM_MasterEnable", {
+                Text = "Enable Quantum",
+                Default = M.enabled,
+                Tooltip = "Master switch. OFF kills counter, fakelag, char-move. (RightCtrl)",
+            }):OnChanged(function(v) M.Set(v) end)
+            G:AddLabel("Hotkey: Right Ctrl toggles master")
+            G:AddDivider()
+        end)
+        -- Quick enables for every major feature — one place to turn things on.
+        -- These bind straight to KH state so toggling here is identical to
+        -- toggling them inside the Combat / Visuals / Automation KH tabs.
+        pcall(function()
+            local G = Tab:AddRightGroupbox("Quick Enables")
+            G:AddLabel("Flip these on to make the feature run.")
+            G:AddDivider()
+            bindToggle(G, "QE_Aimbot",     "Aimbot",       {"Aimbot","Enabled"})
+            bindToggle(G, "QE_SilentAim",  "Silent Aim",   {"SilentAim","Enabled"})
+            bindToggle(G, "QE_Triggerbot", "Triggerbot",   {"Triggerbot","Enabled"})
+            bindToggle(G, "QE_Flickbot",   "Flickbot",     {"Flickbot","Enabled"})
+            bindToggle(G, "QE_Ragebot",    "Ragebot",      {"Ragebot","Enabled"})
+            G:AddDivider()
+            bindToggle(G, "QE_ChamsChar",  "Chams (character)", {"Chams","Character","Enabled"})
+            bindToggle(G, "QE_Crosshair",  "Custom Crosshair",  {"CustomCrosshair","Enabled"})
+            bindToggle(G, "QE_PlayerHit",  "Hit Feedback",      {"PlayerHit","Enabled"})
+            bindToggle(G, "QE_ESPPlayer",  "Player ESP",        {"Esp","Enabled"})
+            G:AddDivider()
+            bindToggle(G, "QE_AutoQueue",   "Auto Queue",       {"AutoQueue","Enabled"})
+            bindToggle(G, "QE_AutoRespawn", "Auto Respawn",     {"AutoRespawn","Enabled"})
+            bindToggle(G, "QE_AutoLoadout", "Auto Loadout",     {"AutoLoadout","Enabled"})
+            bindToggle(G, "QE_AntiKatana",  "Anti-Katana",      {"AntiKatana","Enabled"})
+        end)
         pcall(function()
             local G = Tab:AddLeftGroupbox("HVH Scripts")
             G:AddLabel("Click to load. Each opens its own menu.")
@@ -90669,1210 +90706,6 @@ end
             N_slider(G, "N_CtrQuantumRadius", "Solix Spot Radius", 5, 100, 0, "CtrQuantumRadius")
         end)
     end)
-
-    -- =============== Tab: combat ===============
-    pcall(function()
-        local Tab = Window:AddTab("combat")
-
-        -- ---------- Quick master toggles ----------
-        pcall(function()
-            local G = Tab:AddLeftGroupbox("Quick Combat Toggle")
-            G:AddLabel("Flip Aimbot / Ragebot / SilentAim /\nTriggerbot / Flickbot together.")
-            G:AddDivider()
-            G:AddButton({
-                Text = "Enable ALL combat features",
-                Func = function()
-                    _G.__QuantumSetCombat(true)
-                    pcall(function() if Library.Notify then
-                        Library:Notify("All combat features ENABLED", 3)
-                    end end)
-                end,
-                Tooltip = "Turns ON: Aimbot, Ragebot, SilentAim, Triggerbot, Flickbot",
-            })
-            G:AddButton({
-                Text = "Disable ALL combat features",
-                Func = function()
-                    _G.__QuantumSetCombat(false)
-                    pcall(function() if Library.Notify then
-                        Library:Notify("All combat features DISABLED", 3)
-                    end end)
-                end,
-            })
-            G:AddDivider()
-            G:AddButton({
-                Text = "Apply Max Aggression preset",
-                Tooltip = "Pushes Ragebot + Evasion + Flickbot toward most aggressive + defensive values. Re-run after you tweak sliders if you want defaults back.",
-                Func = function()
-                    if _G.__QuantumApplyMaxAggression then
-                        _G.__QuantumApplyMaxAggression()
-                        pcall(function() if Library.Notify then
-                            Library:Notify("Max Aggression preset re-applied", 3)
-                        end end)
-                    end
-                end,
-            })
-        end)
-
-        -- ---------- Ragebot weapon selection ----------
-        pcall(function()
-            local G = Tab:AddLeftGroupbox("Ragebot Weapons")
-            G:AddLabel("Which weapon slots Ragebot is\nallowed to use.")
-            G:AddDivider()
-
-            -- First-run only: KH's default has Melee=true which surprises people.
-            -- We only flip it OFF on the *first* run (when the user has never
-            -- touched this script's melee preference). After that we respect
-            -- whatever the user picked. A dedicated marker key tracks "first run".
-            pcall(function()
-                if _G.__QuantumStore and _G.__QuantumStore:Get({"__QuantumMeleeInit"}) ~= true then
-                    _G.__QuantumStore:Set({"Ragebot","Weapons","Enabled","Melee"}, false)
-                    _G.__QuantumStore:Set({"Ragebot","Weapons","Priority"}, {"Primary","Secondary"})
-                    _G.__QuantumStore:Set({"__QuantumMeleeInit"}, true)
-                end
-            end)
-
-            local function wToggle(flag, label, slot, default)
-                local path = {"Ragebot","Weapons","Enabled",slot}
-                local cur = (function()
-                    local ok, v = pcall(function()
-                        return _G.__QuantumStore and _G.__QuantumStore:Get(path)
-                    end)
-                    if ok and type(v) == "boolean" then return v end
-                    return default
-                end)()
-                local t = G:AddToggle(flag, { Text = label, Default = cur })
-                if t and t.OnChanged then
-                    t:OnChanged(function(v)
-                        pcall(function()
-                            _G.__QuantumStore:Set(path, v)
-                            -- Keep Priority in sync so toggling Melee ON here
-                            -- also puts it back in the Priority list.
-                            if slot == "Melee" then
-                                local pri = {"Primary","Secondary"}
-                                if v then pri[#pri+1] = "Melee" end
-                                _G.__QuantumStore:Set({"Ragebot","Weapons","Priority"}, pri)
-                            end
-                        end)
-                    end)
-                end
-            end
-
-            wToggle("Quantum_Rage_Primary",   "Primary",   "Primary",   true)
-            wToggle("Quantum_Rage_Secondary", "Secondary", "Secondary", true)
-            wToggle("Quantum_Rage_Melee",     "Melee",     "Melee",     false) -- user doesn't want auto-melee by default
-        end)
-
-        pcall(function()
-            local G = Tab:AddRightGroupbox("Notes")
-            G:AddLabel("Weapon priority goes Primary ->\nSecondary -> Melee.")
-            G:AddLabel("")
-            G:AddLabel("Un-check a slot to stop Ragebot\nfrom ever using that weapon.")
-            G:AddLabel("")
-            G:AddLabel("Melee is OFF by default so\nRagebot doesn't swap to a sword\nwhen Primary runs out.")
-            G:AddDivider()
-            G:AddButton({
-                Text = "Reset weapons to KH default (all on)",
-                Func = function()
-                    pcall(function()
-                        local store = _G.__QuantumStore
-                        if not store then return end
-                        store:Set({"Ragebot","Weapons","Enabled","Primary"},   true)
-                        store:Set({"Ragebot","Weapons","Enabled","Secondary"}, true)
-                        store:Set({"Ragebot","Weapons","Enabled","Melee"},     true)
-                    end)
-                    pcall(function() if Library.Notify then
-                        Library:Notify("Weapons reset to Primary + Secondary + Melee", 3)
-                    end end)
-                end,
-            })
-        end)
-    end)
-
-
-    -- =============================================================================
-    -- Max Aggression preset
-    -- Pushes KH Ragebot + Evasion toward tightest aim + fastest dodge.
-    -- Fires on load; can be re-applied anytime via `_G.__QuantumApplyMaxAggression()`
-    -- or the "Apply Max Aggression" button under the combat tab.
-    -- =============================================================================
-    _G.__QuantumApplyMaxAggression = function()
-        pcall(function()
-            local store = _G.__QuantumStore
-            if not store then return end
-
-            -- Core Ragebot
-            store:Set({"Ragebot", "PrioritizeHackers"},  true)
-            store:Set({"Ragebot", "UtilizeHealthLead"},  true)
-            store:Set({"Ragebot", "ShootFrames"},        1)
-            -- Stability: tighter than default (0.15). Too tight (<0.05) makes it
-            -- miss while jittering, so land around 0.08.
-            store:Set({"Ragebot", "Stability"},          0.08)
-
-            -- Weapons: leave whichever slots the user picked in the combat tab
-            -- (Primary / Secondary / Melee) alone. Only tune the fallback rule.
-            store:Set({"Ragebot", "Weapons", "OnEmpty"}, "SwapOrReload")
-
-            -- Evasion: ProjectileBreaker is the strongest mode because it
-            -- reacts to incoming shots rather than wandering randomly.
-            store:Set({"Ragebot", "Evasion", "Mode"}, "ProjectileBreaker")
-            store:Set({"Ragebot", "Evasion", "ProjectileBreaker", "RepositionInterval"}, 0.08)
-            store:Set({"Ragebot", "Evasion", "ProjectileBreaker", "DepthForward"},        {Min = 1, Max = 6})
-            store:Set({"Ragebot", "Evasion", "ProjectileBreaker", "DepthForwardFrequency"}, 10)
-            store:Set({"Ragebot", "Evasion", "ProjectileBreaker", "DepthUp"},             {Min = 1, Max = 7})
-            store:Set({"Ragebot", "Evasion", "ProjectileBreaker", "DepthUpFrequency"},    10)
-            store:Set({"Ragebot", "Evasion", "ProjectileBreaker", "FallbackAnchorFromCharacter"}, true)
-            store:Set({"Ragebot", "Evasion", "ProjectileBreaker", "FallbackBaseRadius"},  60)
-            store:Set({"Ragebot", "Evasion", "ProjectileBreaker", "FallbackRadiusRandomFactor"}, 0.4)
-
-            -- Random evasion fallback params (used if user flips mode later)
-            store:Set({"Ragebot", "Evasion", "Random", "AnchorFromCharacter"}, true)
-            store:Set({"Ragebot", "Evasion", "Random", "BaseRadius"},          80)
-            store:Set({"Ragebot", "Evasion", "Random", "RadiusRandomFactor"},  0.5)
-            store:Set({"Ragebot", "Evasion", "Translocate", "Offset"},         -4)
-
-            -- Flickbot: fire enabled, tight cooldown
-            store:Set({"Flickbot", "Shoot"},         true)
-            store:Set({"Flickbot", "ShotDelay"},     0)
-            store:Set({"Flickbot", "Cooldown"},      120)
-            store:Set({"Flickbot", "FlickDuration"}, 90)
-            store:Set({"Flickbot", "Curvature"},     18)
-            store:Set({"Flickbot", "Humanness"},     20)
-        end)
-    end
-
-    task.spawn(function()
-        -- Wait for KH store, then apply once
-        for _ = 1, 60 do
-            if _G.__QuantumStore then
-                _G.__QuantumApplyMaxAggression()
-                pcall(function()
-                    if Library and Library.Notify then
-                        Library:Notify("Max Aggression preset applied", 4)
-                    end
-                end)
-                break
-            end
-            task.wait(0.2)
-        end
-    end)
-
-
-    -- =============================================================================
-    -- Quantum Boost Module
-    -- Six supplementary layers written fresh for Quantum:
-    --   1. Resolver          - estimates real position when enemies spoof CFrame
-    --   2. Visibility hitbox - swaps KH's TargetHitboxes to Head when head is visible,
-    --                          chest when head is blocked, legs otherwise
-    --   3. Smart scorer      - rewrites KH TargetHitboxes array order so the best
-    --                          target hitbox is first, biased by distance+visibility+HP
-    --   4. Prediction tuner  - measures round-trip ping, writes KH Prediction scalar
-    --   5. Shot-pattern eva  - records times we take damage, infers interval, phases
-    --                          Evasion.ProjectileBreaker.RepositionInterval off-beat
-    --   6. Client backtrack  - keeps ~400ms of each enemy's HRP history, exposes a
-    --                          lookup. Rivals' remote hit-reg may or may not accept it;
-    --                          this is a client-side feed, no exploit.
-    -- All code is written here from scratch; no cheat library source copied.
-    -- =============================================================================
-    pcall(function()
-        local Players    = game:GetService("Players")
-        local RunService = game:GetService("RunService")
-        local Workspace  = game:GetService("Workspace")
-        local Stats      = game:GetService("Stats")
-        local LocalPlayer = Players.LocalPlayer
-
-        -- =====================================================================
-        -- Shared config (all defaults aggressive; UI exposes them)
-        -- =====================================================================
-        local CFG = {
-            -- Resolver (tuned more aggressive 2026-11-01)
-            resolver_on             = true,
-            resolver_jump_studs     = 5,       -- lowered 8 -> 5: catches smaller teleports
-            resolver_smooth_frames  = 3,       -- lowered 6 -> 3: faster lock-on
-            resolver_mark_as_hacker = true,
-            resolver_score_trigger  = 0.35,    -- was 0.5; kicks in sooner
-            resolver_score_up       = 0.35,    -- was 0.25; faster rise
-            resolver_score_decay    = 0.03,    -- was 0.05; slower fall (stays flagged)
-            resolver_vel_mismatch   = true,    -- also detect velocity-direction spoof
-            resolver_vel_dot_thresh = -0.3,    -- vel dot(frame delta) < this = suspicious
-            resolver_extrapolate    = true,    -- predict next pos with last real velocity
-
-            -- Pattern learning (per-enemy, 2026-11-01)
-            --   Tracks each enemy's yaw history to:
-            --     * detect fake-angle 180° flip period
-            --     * estimate jitter amplitude / frequency
-            --     * predict "real" angle by voting between fake-corrected samples
-            resolver_learn_on       = true,
-            resolver_hist_frames    = 90,      -- ~1.5s @ 60fps of yaw samples
-            resolver_flip_tol_deg   = 120,     -- yaw delta over this = fake flip event
-            resolver_min_samples    = 20,      -- need this many samples before trusting learned pattern
-            resolver_bias_strength  = 0.6,     -- 0..1 how much to trust learned correction over raw yaw
-
-            -- Visibility hitbox selector
-            hitbox_on               = true,
-            hitbox_order_head_first = true,
-            hitbox_min_dot          = -0.2,    -- raycast must not be blocked by non-char parts
-            hitbox_update_hz        = 20,
-
-            -- Smart scorer weights (0..1)
-            scorer_on               = true,
-            scorer_w_distance       = 0.3,
-            scorer_w_visibility     = 0.5,
-            scorer_w_health         = 0.1,
-            scorer_w_crosshair      = 0.4,
-            scorer_update_hz        = 15,
-
-            -- Prediction tuner
-            prediction_on           = true,
-            prediction_base         = 0.05,
-            prediction_per_100ms    = 0.9,     -- adds this to Prediction per 100ms of ping
-            prediction_max          = 1.5,
-
-            -- Shot-pattern evasion
-            pattern_on              = true,
-            pattern_history         = 10,      -- hits to remember
-            pattern_phase_offset    = 0.5,     -- fraction of interval to offset
-
-            -- Backtrack
-            backtrack_on            = true,
-            backtrack_ms            = 400,     -- history length
-        }
-
-        -- =====================================================================
-        -- Util: raycast ignoring characters and transparent parts
-        -- =====================================================================
-        local function raycastClear(from, to, excludeChar)
-            local dir = to - from
-            local len = dir.Magnitude
-            if len < 0.01 then return true end
-            local params = RaycastParams.new()
-            params.FilterType = Enum.RaycastFilterType.Exclude
-            local filter = {}
-            if LocalPlayer.Character then filter[#filter+1] = LocalPlayer.Character end
-            if excludeChar then filter[#filter+1] = excludeChar end
-            params.FilterDescendantsInstances = filter
-            params.IgnoreWater = true
-            local hit = Workspace:Raycast(from, dir, params)
-            if not hit then return true end
-            -- Treat near-transparent / collideless parts as not blocking
-            if hit.Instance then
-                if hit.Instance.Transparency and hit.Instance.Transparency >= 0.75 then return true end
-                if hit.Instance.CanCollide == false and hit.Instance.CanQuery == false then return true end
-            end
-            return false
-        end
-
-        local function myHead()
-            local c = LocalPlayer.Character
-            return c and (c:FindFirstChild("Head") or c:FindFirstChild("HumanoidRootPart"))
-        end
-
-        -- =====================================================================
-        -- Per-player state table
-        -- =====================================================================
-        local state = {}  -- [player] = { lastPos, lastSeen, velSamples, posHistory, smoothPos, lastResolveTick }
-
-        local function stateFor(player)
-            local s = state[player]
-            if s then return s end
-            s = {
-                lastPos      = nil,
-                lastSeen     = 0,
-                velSamples   = {},
-                posHistory   = {},     -- {t, pos} entries
-                smoothPos    = nil,
-                lastResolveTick = 0,
-                spoofScore   = 0,      -- 0..1 confidence that this player is spoofing
-            }
-            state[player] = s
-            return s
-        end
-
-        Players.PlayerRemoving:Connect(function(p) state[p] = nil end)
-
-        -- =====================================================================
-        -- (6) Backtrack buffer: ring-ish history indexed by time
-        -- =====================================================================
-        local function pushHistory(s, pos, t)
-            local h = s.posHistory
-            h[#h+1] = { t = t, p = pos }
-            -- trim entries older than backtrack window
-            local cutoff = t - (CFG.backtrack_ms / 1000)
-            while h[1] and h[1].t < cutoff do
-                table.remove(h, 1)
-            end
-        end
-
-        local function backtrackAt(player, msAgo)
-            if not CFG.backtrack_on then return nil end
-            local s = state[player]; if not s then return nil end
-            local h = s.posHistory
-            if not h[1] then return nil end
-            local target = tick() - (msAgo / 1000)
-            -- Find closest sample by t
-            local best = h[1]
-            local bestD = math.abs(h[1].t - target)
-            for i = 2, #h do
-                local d = math.abs(h[i].t - target)
-                if d < bestD then best = h[i]; bestD = d end
-            end
-            return best.p
-        end
-
-        -- Expose for user scripts / future hooks
-        _G.__QuantumBacktrack = backtrackAt
-        -- Expose the live CFG so the RageCounter bridge can tune per-enemy
-        _G.__QuantumBoostCFG = CFG
-
-        -- =====================================================================
-        -- (1) Resolver: detect large frame-to-frame jumps -> spoofed CFrame
-        -- =====================================================================
-        -- -----------------------------------------------------------------
-        -- Pattern learning helpers
-        -- -----------------------------------------------------------------
-        local function wrapYaw(d)
-            while d > 180 do d = d - 360 end
-            while d < -180 do d = d + 360 end
-            return d
-        end
-
-        local function updatePatternLearning(player, s, hrp, nowT)
-            if not CFG.resolver_learn_on or not hrp then return end
-            s.yawHist = s.yawHist or {}
-            s.flipTimes = s.flipTimes or {}
-
-            local look = hrp.CFrame.LookVector
-            local yawDeg = math.deg(math.atan2(look.X, look.Z))
-
-            local prev = s.yawHist[#s.yawHist]
-            if prev then
-                local d = wrapYaw(yawDeg - prev.y)
-                -- Fake-flip event: enemy jumped by more than ~120° in a single frame
-                if math.abs(d) > CFG.resolver_flip_tol_deg then
-                    table.insert(s.flipTimes, nowT)
-                    while #s.flipTimes > 10 do table.remove(s.flipTimes, 1) end
-                end
-            end
-            table.insert(s.yawHist, { y = yawDeg, t = nowT })
-            while #s.yawHist > CFG.resolver_hist_frames do
-                table.remove(s.yawHist, 1)
-            end
-
-            -- Estimate flip period
-            if #s.flipTimes >= 3 then
-                local sum, n = 0, 0
-                for i = 2, #s.flipTimes do
-                    sum = sum + (s.flipTimes[i] - s.flipTimes[i - 1])
-                    n = n + 1
-                end
-                s.learnedFlipPeriod = sum / math.max(1, n)
-            end
-
-            -- Learn dominant jitter center: median of yaw history
-            if #s.yawHist >= CFG.resolver_min_samples then
-                local list = {}
-                for i = 1, #s.yawHist do list[i] = s.yawHist[i].y end
-                table.sort(list)
-                local mid = list[math.floor(#list / 2)]
-                s.learnedCenter = mid
-
-                -- Jitter amplitude = (p90 - p10) / 2
-                local p10 = list[math.max(1, math.floor(#list * 0.1))]
-                local p90 = list[math.min(#list, math.floor(#list * 0.9))]
-                s.learnedAmp = (p90 - p10) / 2
-            end
-        end
-
-        -- Return corrected position using learned pattern. If we've seen enough
-        -- yaw samples, bias the player's position toward where their fake-angle
-        -- center suggests they really are standing (vs where they claim).
-        local function applyLearnedBias(s, rawPos, hrp)
-            if not CFG.resolver_learn_on or not s.learnedCenter then return rawPos end
-            if #(s.yawHist or {}) < CFG.resolver_min_samples then return rawPos end
-            if not hrp then return rawPos end
-
-            -- If enemy's current yaw is far from the learned center, they're
-            -- probably in a fake-flip frame; trust the smoothed history over
-            -- the current (fake) orientation. The position correction we can
-            -- apply is small (we only shift by a fraction of the extrapolated
-            -- offset), but it's enough to tilt the Ragebot's aim toward the
-            -- actual torso rather than the fake one.
-            local look = hrp.CFrame.LookVector
-            local curYaw = math.deg(math.atan2(look.X, look.Z))
-            local delta = wrapYaw(curYaw - s.learnedCenter)
-
-            -- If |delta| > learnedAmp*1.5, we're definitely in a fake frame.
-            -- Pull position slightly toward the opposite side (where their
-            -- real body probably is).
-            if s.learnedAmp and math.abs(delta) > (s.learnedAmp * 1.5) then
-                local sign = delta > 0 and 1 or -1
-                local correction = CFrame.Angles(0, math.rad(-sign * s.learnedAmp), 0)
-                -- Offset by ~1 stud in the corrected direction (torso width)
-                local offset = (correction * CFrame.new(1, 0, 0)).Position * CFG.resolver_bias_strength
-                return rawPos + offset
-            end
-            return rawPos
-        end
-
-        local function updateResolver(player, s, nowPos, dt)
-            if not CFG.resolver_on then return nowPos end
-            local last = s.lastPos
-            if not last then return nowPos end
-            local delta = nowPos - last
-            local jump = delta.Magnitude
-            -- Normal running speed ~ 24-50 studs/s. Jump beyond that in one frame = spoof.
-            local maxReal = 60 * dt + 1.0
-
-            -- Primary: distance jump
-            local flagged = jump > math.max(CFG.resolver_jump_studs, maxReal)
-
-            -- Secondary: velocity direction mismatch (new 2026-11-01).
-            --   If the enemy's reported velocity points opposite to how the
-            --   HRP actually moved this frame, server is lying about facing.
-            if CFG.resolver_vel_mismatch and not flagged then
-                local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-                if hrp and jump > 0.5 then
-                    local reportedVel = hrp.AssemblyLinearVelocity
-                    local reportedLen = reportedVel.Magnitude
-                    if reportedLen > 4 then
-                        local vdir = reportedVel / reportedLen
-                        local ddir = delta / jump
-                        if vdir:Dot(ddir) < CFG.resolver_vel_dot_thresh then
-                            flagged = true
-                        end
-                    end
-                end
-            end
-
-            if flagged then
-                s.spoofScore = math.min(1, (s.spoofScore or 0) + CFG.resolver_score_up)
-            else
-                s.spoofScore = math.max(0, (s.spoofScore or 0) - CFG.resolver_score_decay)
-            end
-
-            -- Track last believable velocity for extrapolation
-            if not flagged and jump > 0 then
-                s.lastRealVel = delta / math.max(dt, 1e-3)
-            end
-
-            -- Pattern learning (always track, even when not spoofed; need
-            -- clean samples to learn baseline jitter)
-            local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-            updatePatternLearning(player, s, hrp, tick())
-
-            if s.spoofScore >= CFG.resolver_score_trigger then
-                -- Smooth out teleport noise using exponential moving average
-                local target = nowPos
-                if CFG.resolver_extrapolate and s.lastRealVel then
-                    -- When spoofed, don't trust reported pos; extrapolate from
-                    -- the last real velocity instead
-                    target = last + s.lastRealVel * dt
-                end
-                -- Apply learned bias on top of extrapolated position
-                target = applyLearnedBias(s, target, hrp)
-                if not s.smoothPos then
-                    s.smoothPos = target
-                else
-                    local a = 1 / math.max(1, CFG.resolver_smooth_frames)
-                    s.smoothPos = s.smoothPos:Lerp(target, a)
-                end
-                -- Optional: tag as hacker so Ragebot prioritizes them
-                if CFG.resolver_mark_as_hacker and _G.__QuantumStore then
-                    pcall(function()
-                        local list = _G.__QuantumStore:Get({"Ragebot", "FlaggedHackers"}) or {}
-                        if type(list) == "table" then
-                            local uid = tostring(player.UserId)
-                            if not list[uid] then
-                                list[uid] = true
-                                _G.__QuantumStore:Set({"Ragebot", "FlaggedHackers"}, list)
-                            end
-                        end
-                    end)
-                end
-                return s.smoothPos
-            else
-                s.smoothPos = nowPos
-                return nowPos
-            end
-        end
-
-        -- =====================================================================
-        -- (2) Visibility hitbox selector: pick which parts KH aims at
-        -- =====================================================================
-        local hitboxLastWrite = 0
-        local function updateHitbox(topTargetPlayer, topTargetChar)
-            if not CFG.hitbox_on then return end
-            if not _G.__QuantumStore then return end
-            local tn = tick()
-            if tn - hitboxLastWrite < 1 / CFG.hitbox_update_hz then return end
-            hitboxLastWrite = tn
-            local from = (myHead() and myHead().Position) or (LocalPlayer.Character and LocalPlayer.Character.PrimaryPart and LocalPlayer.Character.PrimaryPart.Position)
-            if not from then return end
-            local picks = {}
-            if topTargetChar then
-                local head = topTargetChar:FindFirstChild("Head")
-                local chest = topTargetChar:FindFirstChild("UpperTorso")
-                local lower = topTargetChar:FindFirstChild("LowerTorso")
-                if head and raycastClear(from, head.Position, topTargetChar) then
-                    picks[#picks+1] = "Head"
-                end
-                if chest and raycastClear(from, chest.Position, topTargetChar) then
-                    picks[#picks+1] = "UpperTorso"
-                end
-                if lower and raycastClear(from, lower.Position, topTargetChar) then
-                    picks[#picks+1] = "LowerTorso"
-                end
-            end
-            if #picks == 0 then
-                picks = { "Head", "UpperTorso", "LowerTorso" }   -- fallback: try all
-            elseif CFG.hitbox_order_head_first then
-                -- picks already ordered head->chest->legs
-            end
-            pcall(function()
-                _G.__QuantumStore:Set({"Aimbot", "TargetHitboxes"}, picks)
-                _G.__QuantumStore:Set({"SilentAim", "TargetHitboxes"}, picks)
-                _G.__QuantumStore:Set({"Triggerbot", "TargetHitboxes"}, picks)
-                _G.__QuantumStore:Set({"Flickbot", "TargetHitboxes"}, picks)
-            end)
-        end
-
-        -- =====================================================================
-        -- (3) Smart target scorer: picks the "best" player, feeds (2) and friends
-        -- =====================================================================
-        local scorerLastRun = 0
-        local topTarget      -- current best target: {player=, char=, hum=, hrp=}
-        local function scoreNow()
-            if not CFG.scorer_on then return end
-            local tn = tick()
-            if tn - scorerLastRun < 1 / CFG.scorer_update_hz then return end
-            scorerLastRun = tn
-
-            local meChar = LocalPlayer.Character
-            local meHead = myHead()
-            if not (meChar and meHead) then return end
-            local camera = Workspace.CurrentCamera
-            local look = camera and camera.CFrame.LookVector
-
-            local best, bestScore = nil, -math.huge
-            for _, player in ipairs(Players:GetPlayers()) do
-                if player == LocalPlayer then continue end
-                local char = player.Character
-                local hum = char and char:FindFirstChildOfClass("Humanoid")
-                local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                if not (char and hum and hrp and hum.Health > 0) then continue end
-
-                local s = state[player]
-                local pos = (s and s.smoothPos) or hrp.Position
-                local toVec = pos - meHead.Position
-                local dist = toVec.Magnitude
-                if dist < 0.01 then continue end
-                local toUnit = toVec / dist
-
-                -- Visibility weight: 1 if a chest ray is clear, else 0.3
-                local visW = raycastClear(meHead.Position, pos, char) and 1 or 0.3
-
-                -- Distance weight: closer = higher, falls off smoothly
-                local distW = 1 - math.clamp(dist / 500, 0, 1)
-
-                -- Crosshair weight: dot product with camera look
-                local dot = look and look:Dot(toUnit) or 0
-                local chW = math.max(0, (dot + 1) * 0.5)   -- 0..1
-
-                -- Low HP weight: finish off wounded first
-                local hpW = 1 - math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
-                hpW = 0.3 + 0.7 * hpW   -- never fully ignore full-HP players
-
-                -- Spoof penalty: slight bump (we want to shoot the cheaters)
-                local spoofW = (s and s.spoofScore and s.spoofScore > 0.5) and 1.2 or 1
-
-                local score =
-                      distW * CFG.scorer_w_distance
-                    + visW  * CFG.scorer_w_visibility
-                    + hpW   * CFG.scorer_w_health
-                    + chW   * CFG.scorer_w_crosshair
-                score = score * spoofW
-
-                if score > bestScore then
-                    best = { player = player, char = char, hum = hum, hrp = hrp, score = score }
-                    bestScore = score
-                end
-            end
-            topTarget = best
-            if best then updateHitbox(best.player, best.char) end
-        end
-
-        -- =====================================================================
-        -- (4) Ping-aware Prediction tuner
-        -- =====================================================================
-        local pingLastRead = 0
-        local function updatePrediction()
-            if not CFG.prediction_on then return end
-            if not _G.__QuantumStore then return end
-            local tn = tick()
-            if tn - pingLastRead < 1 then return end
-            pingLastRead = tn
-            local pingMs = 0
-            pcall(function()
-                local item = Stats.Network.ServerStatsItem["Data Ping"]
-                if item then pingMs = item:GetValue() end
-            end)
-            local extra = (pingMs / 100) * CFG.prediction_per_100ms
-            local pred  = math.min(CFG.prediction_max, CFG.prediction_base + extra)
-            pcall(function()
-                _G.__QuantumStore:Set({"Aimbot", "Prediction"}, pred)
-                _G.__QuantumStore:Set({"SilentAim", "Prediction"}, pred)
-                _G.__QuantumStore:Set({"Ragebot", "Prediction"}, pred)
-                _G.__QuantumStore:Set({"Flickbot", "Prediction"}, pred)
-            end)
-        end
-
-        -- =====================================================================
-        -- (5) Shot-pattern Evasion phase
-        -- =====================================================================
-        local hitTimes = {}
-        local function recordHit()
-            hitTimes[#hitTimes+1] = tick()
-            while #hitTimes > CFG.pattern_history do table.remove(hitTimes, 1) end
-            if not CFG.pattern_on or #hitTimes < 3 then return end
-            if not _G.__QuantumStore then return end
-            local gaps = {}
-            for i = 2, #hitTimes do gaps[#gaps+1] = hitTimes[i] - hitTimes[i-1] end
-            table.sort(gaps)
-            local median = gaps[math.ceil(#gaps / 2)]
-            if median < 0.05 or median > 2 then return end
-            local phased = median * CFG.pattern_phase_offset
-            pcall(function()
-                _G.__QuantumStore:Set({"Ragebot", "Evasion", "ProjectileBreaker", "RepositionInterval"}, phased)
-            end)
-        end
-
-        -- Detect taking damage: Humanoid.HealthChanged
-        local function hookOwnChar(char)
-            local hum = char:FindFirstChildOfClass("Humanoid")
-            if not hum then return end
-            local lastHp = hum.Health
-            hum.HealthChanged:Connect(function(h)
-                if h < lastHp - 1 then recordHit() end
-                lastHp = h
-            end)
-        end
-        if LocalPlayer.Character then hookOwnChar(LocalPlayer.Character) end
-        LocalPlayer.CharacterAdded:Connect(hookOwnChar)
-
-        -- =====================================================================
-        -- Master update loop (runs every frame)
-        -- =====================================================================
-        RunService.Heartbeat:Connect(function(dt)
-            local now = tick()
-            for _, player in ipairs(Players:GetPlayers()) do
-                if player == LocalPlayer then continue end
-                local char = player.Character
-                local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                if not (char and hrp) then continue end
-                local s = stateFor(player)
-                local raw = hrp.Position
-                local resolved = updateResolver(player, s, raw, dt)
-                pushHistory(s, resolved, now)
-                s.lastPos = raw
-                s.lastSeen = now
-            end
-            scoreNow()
-            updatePrediction()
-        end)
-    end)
-
-    -- =============================================================================
-    -- Visuals+ tab
-    -- Fresh Quantum-native overlay. Draws on top of KH ESP, independent of KH data.
-    -- Features inspired by the visual categories a well-made library would expose,
-    -- but all code is written from scratch using standard Luau + Drawing API.
-    -- =============================================================================
-    pcall(function()
-        local Tab = Window:AddTab("visuals+", "sparkles")
-
-        local Players     = game:GetService("Players")
-        local Lighting    = game:GetService("Lighting")
-        local RunService  = game:GetService("RunService")
-        local Workspace   = game:GetService("Workspace")
-        local LocalPlayer = Players.LocalPlayer
-
-        -- ---------- toggle & option state (local, independent of KH store) ----------
-        local T = {
-            skeleton = false, skeleton_outline = true,
-            healthbar = false,
-            bounds_dynamic = false,
-            flag_health = false, flag_staring = false,
-        }
-        local O = {
-            skel_thick       = 1.5,
-            skel_col         = Color3.fromRGB(255, 255, 255),
-            skel_out_col     = Color3.fromRGB(0, 0, 0),
-            hp_lerp_speed    = 10,
-            hp_col_full      = Color3.fromRGB(60, 220, 90),
-            hp_col_mid       = Color3.fromRGB(255, 215, 0),
-            hp_col_low       = Color3.fromRGB(255, 50, 50),
-            bounds_width     = 1.0,
-            flag_prefix      = "",
-            stare_dot_thresh = 0.97,
-        }
-
-        -- ---------- UI: Overlay ESP ----------
-        local gEsp = Tab:AddLeftGroupbox("Overlay ESP")
-        gEsp:AddToggle("qvp_skel",       { Text = "Skeleton",           Default = false })
-            :OnChanged(function(v) T.skeleton = v end)
-        gEsp:AddToggle("qvp_skel_out",   { Text = "Skeleton outline",   Default = false })
-            :OnChanged(function(v) T.skeleton_outline = v end)
-        gEsp:AddSlider("qvp_skel_thick", { Text = "Skeleton thickness", Default = 1.5, Min = 0.5, Max = 4, Rounding = 1 })
-            :OnChanged(function(v) O.skel_thick = v end)
-        gEsp:AddLabel("Skeleton color")
-            :AddColorPicker("qvp_skel_col", { Default = O.skel_col, Title = "Skeleton color" })
-        gEsp:AddLabel("Outline color")
-            :AddColorPicker("qvp_skel_out_col", { Default = O.skel_out_col, Title = "Outline color" })
-
-        gEsp:AddDivider()
-
-        gEsp:AddToggle("qvp_hp",         { Text = "Healthbar (lerped)", Default = false })
-            :OnChanged(function(v) T.healthbar = v end)
-        gEsp:AddSlider("qvp_hp_speed",   { Text = "Lerp speed",         Default = 10, Min = 1, Max = 40, Rounding = 1 })
-            :OnChanged(function(v) O.hp_lerp_speed = v end)
-
-        gEsp:AddDivider()
-
-        gEsp:AddToggle("qvp_box",        { Text = "Dynamic bounds box", Default = false })
-            :OnChanged(function(v) T.bounds_dynamic = v end)
-        gEsp:AddSlider("qvp_box_w",      { Text = "Box width scale %",  Default = 100, Min = 50, Max = 200, Rounding = 0, Suffix = "%" })
-            :OnChanged(function(v) O.bounds_width = v / 100 end)
-
-        gEsp:AddDivider()
-
-        gEsp:AddToggle("qvp_fl_hp",      { Text = "Flag: health number",  Default = false })
-            :OnChanged(function(v) T.flag_health = v end)
-        gEsp:AddToggle("qvp_fl_stare",   { Text = "Flag: staring at you", Default = false })
-            :OnChanged(function(v) T.flag_staring = v end)
-        gEsp:AddSlider("qvp_stare_dot",  { Text = "Stare threshold",      Default = 97, Min = 70, Max = 100, Rounding = 0, Suffix = "%" })
-            :OnChanged(function(v) O.stare_dot_thresh = v / 100 end)
-        gEsp:AddInput("qvp_fl_prefix",   { Default = "", Text = "Flag prefix", Placeholder = "e.g. [E] " })
-            :OnChanged(function(v) O.flag_prefix = v or "" end)
-
-        -- Keep live mirrors of the color pickers
-        local function syncColors()
-            pcall(function() if Options.qvp_skel_col     then O.skel_col     = Options.qvp_skel_col.Value     end end)
-            pcall(function() if Options.qvp_skel_out_col then O.skel_out_col = Options.qvp_skel_out_col.Value end end)
-        end
-
-        -- ---------- Drawing primitives ----------
-        local function newLine()
-            local d = Drawing.new("Line")
-            d.Visible = false; d.Thickness = 1; d.Color = Color3.new(1, 1, 1); d.Transparency = 1
-            return d
-        end
-        local function newText()
-            local d = Drawing.new("Text")
-            d.Visible = false; d.Center = true; d.Outline = true
-            d.OutlineColor = Color3.new(0, 0, 0); d.Color = Color3.new(1, 1, 1)
-            d.Size = 13; d.Font = 2; d.Transparency = 1
-            return d
-        end
-        local function newRect(filled)
-            local d = Drawing.new("Square")
-            d.Visible = false; d.Thickness = 1; d.Color = Color3.new(1, 1, 1)
-            d.Filled = filled == true; d.Transparency = 1
-            return d
-        end
-
-        -- ---------- Per-player cache ----------
-        local BONES = {
-            {"Head","UpperTorso"},
-            {"UpperTorso","LowerTorso"},
-            {"UpperTorso","LeftUpperArm"},
-            {"LeftUpperArm","LeftLowerArm"},
-            {"LeftLowerArm","LeftHand"},
-            {"UpperTorso","RightUpperArm"},
-            {"RightUpperArm","RightLowerArm"},
-            {"RightLowerArm","RightHand"},
-            {"LowerTorso","LeftUpperLeg"},
-            {"LeftUpperLeg","LeftLowerLeg"},
-            {"LeftLowerLeg","LeftFoot"},
-            {"LowerTorso","RightUpperLeg"},
-            {"RightUpperLeg","RightLowerLeg"},
-            {"RightLowerLeg","RightFoot"},
-        }
-        local BOUND_PARTS = { "Head","UpperTorso","LowerTorso","LeftFoot","RightFoot","LeftHand","RightHand" }
-
-        local cache = {}  -- [player] = { outer={}, inner={}, box, hpBg, hpFg, flagHp, flagStare, lerpHP }
-
-        local function build(player)
-            local c = { outer = {}, inner = {}, lerpHP = 100 }
-            for i = 1, #BONES do
-                c.outer[i] = newLine()
-                c.inner[i] = newLine()
-            end
-            c.box       = newRect(false)
-            c.hpBg      = newRect(true);  c.hpBg.Color = Color3.new(0, 0, 0); c.hpBg.Transparency = 0.5
-            c.hpFg      = newRect(true)
-            c.flagHp    = newText()
-            c.flagStare = newText(); c.flagStare.Color = Color3.fromRGB(255, 160, 90)
-            cache[player] = c
-            return c
-        end
-
-        local function destroy(player)
-            local c = cache[player]; if not c then return end
-            for _, d in ipairs(c.outer) do pcall(function() d:Remove() end) end
-            for _, d in ipairs(c.inner) do pcall(function() d:Remove() end) end
-            for _, k in ipairs({"box","hpBg","hpFg","flagHp","flagStare"}) do
-                pcall(function() c[k]:Remove() end)
-            end
-            cache[player] = nil
-        end
-
-        Players.PlayerRemoving:Connect(destroy)
-
-        local function hideAll(c)
-            for _, d in ipairs(c.outer) do d.Visible = false end
-            for _, d in ipairs(c.inner) do d.Visible = false end
-            c.box.Visible = false; c.hpBg.Visible = false; c.hpFg.Visible = false
-            c.flagHp.Visible = false; c.flagStare.Visible = false
-        end
-
-        local function hpColor(frac)
-            if frac >= 0.5 then
-                return O.hp_col_mid:Lerp(O.hp_col_full, (frac - 0.5) * 2)
-            else
-                return O.hp_col_low:Lerp(O.hp_col_mid, frac * 2)
-            end
-        end
-
-        -- ---------- Main render loop ----------
-        RunService.RenderStepped:Connect(function(dt)
-            syncColors()
-            local cam = Workspace.CurrentCamera
-            if not cam then return end
-            local meChar = LocalPlayer.Character
-            local meRoot = meChar and meChar:FindFirstChild("HumanoidRootPart")
-
-            for _, player in ipairs(Players:GetPlayers()) do
-                if player == LocalPlayer then continue end
-                local char = player.Character
-                local hum  = char and char:FindFirstChildOfClass("Humanoid")
-                local root = char and char:FindFirstChild("HumanoidRootPart")
-
-                local alive = char and hum and root and hum.Health > 0
-                local c = cache[player] or build(player)
-
-                if not alive then hideAll(c); continue end
-
-                -- lerp displayed HP toward real HP
-                local realFrac = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
-                c.lerpHP = c.lerpHP + (realFrac * 100 - c.lerpHP) * math.min(1, dt * O.hp_lerp_speed)
-                local shownFrac = c.lerpHP / 100
-
-                -- compute bounds from joint projection
-                local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
-                local anyOn = false
-                for _, name in ipairs(BOUND_PARTS) do
-                    local p = char:FindFirstChild(name)
-                    if p then
-                        local v = cam:WorldToViewportPoint(p.Position)
-                        if v.Z > 0 then
-                            anyOn = true
-                            if v.X < minX then minX = v.X end
-                            if v.Y < minY then minY = v.Y end
-                            if v.X > maxX then maxX = v.X end
-                            if v.Y > maxY then maxY = v.Y end
-                        end
-                    end
-                end
-
-                if not anyOn then hideAll(c); continue end
-
-                -- Skeleton (two-pass: outline then inner)
-                for i, pair in ipairs(BONES) do
-                    local a = char:FindFirstChild(pair[1])
-                    local b = char:FindFirstChild(pair[2])
-                    if a and b and T.skeleton then
-                        local va = cam:WorldToViewportPoint(a.Position)
-                        local vb = cam:WorldToViewportPoint(b.Position)
-                        if va.Z > 0 and vb.Z > 0 then
-                            local pa, pb = Vector2.new(va.X, va.Y), Vector2.new(vb.X, vb.Y)
-                            local out = c.outer[i]
-                            out.Visible   = T.skeleton_outline
-                            out.From, out.To = pa, pb
-                            out.Thickness = O.skel_thick + 2
-                            out.Color     = O.skel_out_col
-                            local inn = c.inner[i]
-                            inn.Visible   = true
-                            inn.From, inn.To = pa, pb
-                            inn.Thickness = O.skel_thick
-                            inn.Color     = O.skel_col
-                        else
-                            c.outer[i].Visible = false; c.inner[i].Visible = false
-                        end
-                    else
-                        c.outer[i].Visible = false; c.inner[i].Visible = false
-                    end
-                end
-
-                -- Dynamic bounds box
-                local w, h = maxX - minX, maxY - minY
-                local scaledW = w * O.bounds_width
-                local cx = (minX + maxX) * 0.5
-                local boxX = cx - scaledW * 0.5
-                if T.bounds_dynamic then
-                    c.box.Visible  = true
-                    c.box.Position = Vector2.new(boxX, minY)
-                    c.box.Size     = Vector2.new(scaledW, h)
-                    c.box.Color    = O.skel_col
-                else
-                    c.box.Visible = false
-                end
-
-                -- Healthbar left of box (lerped, color gradient)
-                if T.healthbar then
-                    local barX = boxX - 6
-                    local barY = minY
-                    c.hpBg.Visible  = true
-                    c.hpBg.Position = Vector2.new(barX, barY)
-                    c.hpBg.Size     = Vector2.new(4, h)
-                    local hpPx = h * shownFrac
-                    c.hpFg.Visible  = true
-                    c.hpFg.Position = Vector2.new(barX, barY + (h - hpPx))
-                    c.hpFg.Size     = Vector2.new(4, hpPx)
-                    c.hpFg.Color    = hpColor(shownFrac)
-                else
-                    c.hpBg.Visible = false; c.hpFg.Visible = false
-                end
-
-                -- Flags under box
-                local fx, fy = cx, maxY + 2
-                if T.flag_health then
-                    c.flagHp.Visible  = true
-                    c.flagHp.Text     = string.format("%s%d HP", O.flag_prefix, math.floor(hum.Health + 0.5))
-                    c.flagHp.Position = Vector2.new(fx, fy)
-                    fy = fy + 14
-                else
-                    c.flagHp.Visible = false
-                end
-
-                if T.flag_staring and meRoot then
-                    local look = root.CFrame.LookVector
-                    local to = (meRoot.Position - root.Position)
-                    local mag = to.Magnitude
-                    if mag > 0.01 then
-                        local dot = look:Dot(to / mag)
-                        if dot >= O.stare_dot_thresh then
-                            c.flagStare.Visible  = true
-                            c.flagStare.Text     = "staring"
-                            c.flagStare.Position = Vector2.new(fx, fy)
-                        else
-                            c.flagStare.Visible = false
-                        end
-                    else
-                        c.flagStare.Visible = false
-                    end
-                else
-                    c.flagStare.Visible = false
-                end
-            end
-        end)
-
-        -- ---------- Sword customization ----------
-        local gSword = Tab:AddRightGroupbox("Sword customization")
-        local S = {
-            on         = false,
-            color      = Color3.fromRGB(255, 255, 255),
-            material   = "Neon",
-            refl       = 0,
-            trans      = 0,
-        }
-        gSword:AddToggle("qvp_sw_on", { Text = "Enable", Default = false })
-            :OnChanged(function(v) S.on = v end)
-        gSword:AddLabel("Blade color")
-            :AddColorPicker("qvp_sw_col", { Default = S.color, Title = "Blade color" })
-        gSword:AddDropdown("qvp_sw_mat", {
-            Values = { "Neon", "Plastic", "Metal", "Glass", "Ice", "ForceField", "SmoothPlastic", "DiamondPlate" },
-            Default = 1, Text = "Material",
-        }):OnChanged(function(v) S.material = v end)
-        gSword:AddSlider("qvp_sw_refl",  { Text = "Reflectance",  Default = 0, Min = 0, Max = 1, Rounding = 2 })
-            :OnChanged(function(v) S.refl = v end)
-        gSword:AddSlider("qvp_sw_trans", { Text = "Transparency", Default = 0, Min = 0, Max = 1, Rounding = 2 })
-            :OnChanged(function(v) S.trans = v end)
-
-        local function isSword(tool)
-            if typeof(tool) ~= "Instance" or not tool:IsA("Tool") then return false end
-            local n = tool.Name:lower()
-            if n:find("sword") or n:find("knife") or n:find("katana")
-            or n:find("blade") or n:find("machete") or n:find("dagger") then
-                return true
-            end
-            if tool:FindFirstChild("Blade") then return true end
-            return false
-        end
-
-        local function paintSword(tool)
-            pcall(function() if Options.qvp_sw_col then S.color = Options.qvp_sw_col.Value end end)
-            local matEnum = Enum.Material[S.material] or Enum.Material.Neon
-            for _, part in ipairs(tool:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    pcall(function()
-                        part.Color        = S.color
-                        part.Material     = matEnum
-                        part.Reflectance  = S.refl
-                        part.Transparency = S.trans
-                    end)
-                end
-            end
-        end
-
-        RunService.Heartbeat:Connect(function()
-            if not S.on then return end
-            local char = LocalPlayer.Character
-            if char then
-                for _, tool in ipairs(char:GetChildren()) do
-                    if isSword(tool) then paintSword(tool) end
-                end
-            end
-            local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
-            if bp then
-                for _, tool in ipairs(bp:GetChildren()) do
-                    if isSword(tool) then paintSword(tool) end
-                end
-            end
-        end)
-
-        -- ---------- World visuals (Lighting stack) ----------
-        local gLight = Tab:AddRightGroupbox("World visuals")
-
-        local function makeOrGet(className, name, defaults)
-            local existing = Lighting:FindFirstChild(name)
-            if existing and existing.ClassName == className then return existing end
-            local inst = Instance.new(className)
-            inst.Name = name
-            for k, v in pairs(defaults or {}) do pcall(function() inst[k] = v end) end
-            inst.Parent = Lighting
-            return inst
-        end
-
-        local bloom = makeOrGet("BloomEffect", "QuantumBloom", {
-            Enabled = false, Intensity = 0.4, Size = 24, Threshold = 0.95,
-        })
-        local cc = makeOrGet("ColorCorrectionEffect", "QuantumCC", {
-            Enabled = false, Brightness = 0, Contrast = 0, Saturation = 0, TintColor = Color3.new(1, 1, 1),
-        })
-        local rays = makeOrGet("SunRaysEffect", "QuantumSunRays", {
-            Enabled = false, Intensity = 0.25, Spread = 1,
-        })
-
-        gLight:AddToggle("qvp_bloom",   { Text = "Bloom",             Default = false })
-            :OnChanged(function(v) bloom.Enabled = v end)
-        gLight:AddSlider("qvp_bloom_i", { Text = "Bloom intensity",   Default = 0.4,  Min = 0, Max = 4,   Rounding = 2 })
-            :OnChanged(function(v) bloom.Intensity = v end)
-        gLight:AddSlider("qvp_bloom_s", { Text = "Bloom size",        Default = 24,   Min = 0, Max = 56,  Rounding = 1 })
-            :OnChanged(function(v) bloom.Size = v end)
-        gLight:AddSlider("qvp_bloom_t", { Text = "Bloom threshold",   Default = 0.95, Min = 0, Max = 2,   Rounding = 2 })
-            :OnChanged(function(v) bloom.Threshold = v end)
-
-        gLight:AddDivider()
-
-        gLight:AddToggle("qvp_cc",         { Text = "Color correction", Default = false })
-            :OnChanged(function(v) cc.Enabled = v end)
-        gLight:AddSlider("qvp_cc_bright",  { Text = "Brightness",       Default = 0, Min = -1, Max = 1, Rounding = 2 })
-            :OnChanged(function(v) cc.Brightness = v end)
-        gLight:AddSlider("qvp_cc_contrast",{ Text = "Contrast",         Default = 0, Min = -1, Max = 1, Rounding = 2 })
-            :OnChanged(function(v) cc.Contrast = v end)
-        gLight:AddSlider("qvp_cc_sat",     { Text = "Saturation",       Default = 0, Min = -1, Max = 1, Rounding = 2 })
-            :OnChanged(function(v) cc.Saturation = v end)
-        gLight:AddLabel("Tint")
-            :AddColorPicker("qvp_cc_tint", { Default = Color3.new(1, 1, 1), Title = "Tint" })
-
-        -- tint live sync
-        RunService.Heartbeat:Connect(function()
-            pcall(function() if Options.qvp_cc_tint then cc.TintColor = Options.qvp_cc_tint.Value end end)
-        end)
-
-        gLight:AddDivider()
-
-        gLight:AddToggle("qvp_rays",   { Text = "Sun rays",         Default = false })
-            :OnChanged(function(v) rays.Enabled = v end)
-        gLight:AddSlider("qvp_rays_i", { Text = "Rays intensity",   Default = 0.25, Min = 0, Max = 1, Rounding = 2 })
-            :OnChanged(function(v) rays.Intensity = v end)
-        gLight:AddSlider("qvp_rays_s", { Text = "Rays spread",      Default = 1,    Min = 0, Max = 1, Rounding = 2 })
-            :OnChanged(function(v) rays.Spread = v end)
-
-        -- Notes
-        local gNote = Tab:AddLeftGroupbox("Notes")
-        gNote:AddLabel("Overlay ESP draws independently\nof KH ESP - you can run both or\nturn KH's off.")
-        gNote:AddLabel("")
-        gNote:AddLabel("Healthbar uses lerp smoothing;\nraise speed for less animation.")
-        gNote:AddLabel("")
-        gNote:AddLabel("Sword custom reapplies every\nframe so dropped/picked up swords\nkeep their look.")
-    end)
-
-    pcall(function()
-        if ThemeManager then
-            ThemeManager:SetLibrary(Library)
-            ThemeManager:SetFolder("QuantumObsidian")
-            ThemeManager:ApplyToTab(Window:AddTab("settings"))
-        end
-    end)
-    pcall(function()
-        if SaveManager then
-            SaveManager:SetLibrary(Library)
-            SaveManager:IgnoreThemeSettings()
-            SaveManager:SetFolder("QuantumObsidian")
-            SaveManager:BuildConfigSection(Window:AddTab("settings"))
-        end
-    end)
-
-    -- Diagnostic: report skipped features to console
-    pcall(function()
-        local skipped = _G.__QuantumSkipped or {}
-        if #skipped > 0 then
-            print("[Quantum] Skipped " .. #skipped .. " invalid-path widget(s):")
-            for _, s in ipairs(skipped) do print("    - " .. s) end
-            if Library.Notify then
-                Library:Notify(("Quantum: %d features skipped (see F9 console)"):format(#skipped), 5)
-            end
-        end
-    end)
-
-    pcall(function() if Library.Notify then Library:Notify("Quantum active (RightShift = menu, F4 = Yabujin)", 4) end end)
-
-    UserInputService.InputBegan:Connect(function(input, gpe)
-        if gpe then return end
-        if input.KeyCode == Enum.KeyCode.RightShift then
-            Library:Toggle()
-        end
-    end)
-
-    pcall(function()
-        if UserInputService.TouchEnabled then
-            local mobileGui = Instance.new("ScreenGui")
-            mobileGui.Name = "QuantumMobileToggle"
-            mobileGui.ResetOnSpawn = false
-            mobileGui.IgnoreGuiInset = true
-            mobileGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-            pcall(function() mobileGui.Parent = gethui() end)
-            if not mobileGui.Parent then mobileGui.Parent = game:GetService("CoreGui") end
-            local btn = Instance.new("TextButton")
-            btn.Size = UDim2.new(0, 56, 0, 56)
-            btn.Position = UDim2.new(0, 20, 0, 140)
-            btn.BackgroundColor3 = Color3.fromRGB(185, 131, 255)
-            btn.BorderSizePixel = 0
-            btn.Text = "Q"; btn.TextColor3 = Color3.fromRGB(0,0,0)
-            btn.Font = Enum.Font.GothamBlack; btn.TextSize = 24
-            btn.AutoButtonColor = false; btn.Active = true; btn.Draggable = true
-            btn.Parent = mobileGui
-            local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(1, 0); corner.Parent = btn
-            local stroke = Instance.new("UIStroke")
-            stroke.Color = Color3.fromRGB(255,255,255); stroke.Thickness = 2
-            stroke.Transparency = 0.5; stroke.Parent = btn
-            btn.MouseButton1Click:Connect(function()
-                Library:Toggle()
-                stroke.Transparency = 0.1; task.wait(0.1); stroke.Transparency = 0.5
-            end)
-        end
-    end)
-end)
 
 -- =============================================================================
 -- Quantum Rage Counter (user upgrade, 2026-11-03)
