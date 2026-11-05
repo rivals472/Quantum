@@ -1,6 +1,7 @@
--- Quantum v3 - 100% custom Quantum UI (Linoria API compatible)
--- Full custom native Roblox UI replacing Millenium / Obsidian / Linoria.
--- Zero external library loaded.
+-- Quantum v3 - Linoria UI
+-- Loads Linoria from GitHub, applies full Quantum patch stack
+-- (AA mutex, Elite AA, Resolver pattern learning, RageCounter,
+-- Server Lag + Quantum FFlag ServerLag, AC Bypass Pack, L7 obfuscator support)
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -26,1469 +27,19 @@ do
 end
 
 -- =============================================================================
--- Quantum UI (inlined). Exports: Library, ThemeManager, SaveManager
+-- Linoria UI loader (only)
 -- =============================================================================
 local Library, ThemeManager, SaveManager
 do
-    local _uiExports = (function()
-        --[[
-        ================================================================================
-          Quantum UI Library — 100% custom Roblox native UI
-          Linoria/Obsidian API-compatible, zero changes needed to existing Quantum code
-          Instance.new based, no external library loaded
-        ================================================================================
-          Public API (Linoria-shaped):
-            Library:CreateWindow({Title, Center, AutoShow, ToggleKeybind})
-              Window:AddTab(name)
-                Tab:AddLeftGroupbox(name) / AddRightGroupbox(name) -> Section
-                  Section:AddToggle(idx, {Text, Default, Callback, Tooltip}) -> Toggle
-                    Toggle:AddColorPicker(idx, {Default, Title, Callback}) -> ColorPicker
-                    Toggle:AddKeyPicker(idx, {Default, Mode, Callback}) -> KeyPicker
-                    Toggle:OnChanged(fn)
-                    Toggle:SetValue(bool)
-                  Section:AddSlider(idx, {Text, Default, Min, Max, Rounding, Callback, Suffix})
-                  Section:AddDropdown(idx, {Text, Values, Default, Multi, Callback})
-                  Section:AddButton({Text, Func})
-                  Section:AddLabel({Text, DoesWrap})
-                  Section:AddDivider()
-                  Section:AddInput(idx, {Default, Placeholder, Callback, Numeric})
-                  Section:AddKeyPicker(idx, {Default, Mode, Callback, Text})
-            Library:Notify(text, duration)
-            Library:Toggle(bool)
-            Library:OnUnload(fn)
-            Library.Toggles[idx]  -- all toggles by idx
-            Library.Options[idx]  -- all other elements by idx
-            Library.Scheme        -- editable color scheme (ThemeManager uses this)
-        ================================================================================
-        ]]
-
-        local Players          = game:GetService("Players")
-        local UserInputService = game:GetService("UserInputService")
-        local RunService       = game:GetService("RunService")
-        local TweenService     = game:GetService("TweenService")
-        local HttpService      = game:GetService("HttpService")
-        local CoreGui          = game:GetService("CoreGui")
-        local LocalPlayer      = Players.LocalPlayer
-
-        local function getHidden() return (gethui and gethui()) or CoreGui end
-
-        -- ============================================================================
-        -- Library root
-        -- ============================================================================
-        local Library = {}
-        Library.__name     = "QuantumUI"
-        Library.Version    = "1.0"
-        Library.Toggled    = true
-        Library.Toggles    = {}
-        Library.Options    = {}
-        Library.Windows    = {}
-        Library.Signals    = {}
-        Library.Notifications = {}
-        Library.ToggleKeybind = Enum.KeyCode.RightControl
-        Library.MinSize    = Vector2.new(580, 400)
-        Library.OpenMenu   = nil
-        Library._unload    = {}
-
-        Library.Scheme = {
-            BackgroundColor = Color3.fromRGB(13, 14, 18),
-            MainColor       = Color3.fromRGB(21, 22, 28),
-            OutlineColor    = Color3.fromRGB(34, 36, 46),
-            AccentColor     = Color3.fromRGB(150, 120, 255),
-            FontColor       = Color3.fromRGB(236, 237, 244),
-            MutedColor      = Color3.fromRGB(140, 142, 160),
-            OffColor        = Color3.fromRGB(66, 68, 85),
-            HeaderColor     = Color3.fromRGB(10, 11, 15),
-        }
-        Library.Font = Enum.Font.Gotham
-
-        -- ============================================================================
-        -- Internals: Instance.new with props, UI helpers
-        -- ============================================================================
-        local function New(class, props)
-            local inst = Instance.new(class)
-            if props then
-                for k, v in pairs(props) do
-                    if k ~= "Parent" then inst[k] = v end
-                end
-                if props.Parent then inst.Parent = props.Parent end
-            end
-            return inst
-        end
-
-        local function RoundCorner(parent, r)
-            return New("UICorner", { CornerRadius = UDim.new(0, r or 4), Parent = parent })
-        end
-        local function Stroke(parent, color, thickness)
-            return New("UIStroke", {
-                Color = color or Library.Scheme.OutlineColor,
-                Thickness = thickness or 1,
-                ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
-                Parent = parent,
-            })
-        end
-        local function Padding(parent, p)
-            return New("UIPadding", {
-                PaddingTop = UDim.new(0, p), PaddingBottom = UDim.new(0, p),
-                PaddingLeft = UDim.new(0, p), PaddingRight = UDim.new(0, p),
-                Parent = parent,
-            })
-        end
-        local function ListLayout(parent, dir, pad, align)
-            return New("UIListLayout", {
-                FillDirection = dir or Enum.FillDirection.Vertical,
-                Padding = UDim.new(0, pad or 4),
-                HorizontalAlignment = align or Enum.HorizontalAlignment.Left,
-                SortOrder = Enum.SortOrder.LayoutOrder,
-                Parent = parent,
-            })
-        end
-        local function safeCall(fn, ...)
-            if type(fn) ~= "function" then return end
-            local ok, err = pcall(fn, ...)
-            if not ok then warn("[QuantumUI] callback error: " .. tostring(err)) end
-        end
-        local function clamp(x, a, b) return math.max(a, math.min(b, x)) end
-        local function round(n, r)
-            if not r or r == 0 then return math.floor(n + 0.5) end
-            local m = 10 ^ r
-            return math.floor(n * m + 0.5) / m
-        end
-
-        -- Theme recoloring: items can register for scheme updates
-        local themeTargets = {}  -- {inst, prop, schemeKey}
-        local function registerTheme(inst, prop, key)
-            themeTargets[#themeTargets + 1] = { inst = inst, prop = prop, key = key }
-            inst[prop] = Library.Scheme[key]
-        end
-        function Library:UpdateColorsUsingRegistry()
-            for _, t in ipairs(themeTargets) do
-                if t.inst and t.inst.Parent then
-                    pcall(function() t.inst[t.prop] = self.Scheme[t.key] end)
-                end
-            end
-        end
-
-        -- ============================================================================
-        -- Draggable helper
-        -- ============================================================================
-        local function makeDraggable(mainFrame, handle)
-            local dragging, dragStart, startPos
-            handle.InputBegan:Connect(function(input)
-                if input.UserInputType == Enum.UserInputType.MouseButton1
-                  or input.UserInputType == Enum.UserInputType.Touch then
-                    dragging = true
-                    dragStart = input.Position
-                    startPos  = mainFrame.Position
-                end
-            end)
-            handle.InputEnded:Connect(function(input)
-                if input.UserInputType == Enum.UserInputType.MouseButton1
-                  or input.UserInputType == Enum.UserInputType.Touch then
-                    dragging = false
-                end
-            end)
-            UserInputService.InputChanged:Connect(function(input)
-                if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
-                  or input.UserInputType == Enum.UserInputType.Touch) then
-                    local delta = input.Position - dragStart
-                    mainFrame.Position = UDim2.new(
-                        startPos.X.Scale, startPos.X.Offset + delta.X,
-                        startPos.Y.Scale, startPos.Y.Offset + delta.Y
-                    )
-                end
-            end)
-        end
-
-        -- ============================================================================
-        -- Notification system
-        -- ============================================================================
-        local notifyRoot
-        local function initNotify(screenGui)
-            notifyRoot = New("Frame", {
-                Name = "Notifications",
-                Size = UDim2.new(0, 280, 1, -20),
-                Position = UDim2.new(1, -300, 0, 10),
-                BackgroundTransparency = 1,
-                Parent = screenGui,
-            })
-            ListLayout(notifyRoot, Enum.FillDirection.Vertical, 6, Enum.HorizontalAlignment.Right)
-        end
-        function Library:Notify(text, duration)
-            if not notifyRoot then return end
-            duration = duration or 3
-            local card = New("Frame", {
-                Size = UDim2.new(1, 0, 0, 40),
-                BackgroundColor3 = Library.Scheme.MainColor,
-                BorderSizePixel = 0,
-                Parent = notifyRoot,
-            })
-            RoundCorner(card, 6)
-            local accent = New("Frame", {
-                Size = UDim2.new(0, 3, 1, 0),
-                BackgroundColor3 = Library.Scheme.AccentColor,
-                BorderSizePixel = 0,
-                Parent = card,
-            })
-            RoundCorner(accent, 2)
-            registerTheme(accent, "BackgroundColor3", "AccentColor")
-            local label = New("TextLabel", {
-                Size = UDim2.new(1, -16, 1, 0),
-                Position = UDim2.new(0, 12, 0, 0),
-                BackgroundTransparency = 1,
-                Text = tostring(text),
-                TextColor3 = Library.Scheme.FontColor,
-                Font = Library.Font,
-                TextSize = 13,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                TextWrapped = true,
-                Parent = card,
-            })
-            registerTheme(label, "TextColor3", "FontColor")
-            registerTheme(card, "BackgroundColor3", "MainColor")
-            task.spawn(function()
-                task.wait(duration)
-                local tw = TweenService:Create(card, TweenInfo.new(0.2), { BackgroundTransparency = 1 })
-                tw:Play(); tw.Completed:Wait()
-                card:Destroy()
-            end)
-        end
-
-        -- ============================================================================
-        -- Window
-        -- ============================================================================
-        local Window = {}; Window.__index = Window
-
-        function Library:CreateWindow(opts)
-            opts = opts or {}
-            -- Reuse the first window if called again (consolidation)
-            if self._mainScreenGui then
-                -- subsequent CreateWindow: return existing window
-                if opts.Title and self._title then
-                    self._title.Text = self._title.Text .. " · " .. tostring(opts.Title)
-                end
-                return self._firstWindow
-            end
-
-            local screenGui = New("ScreenGui", {
-                Name = "QuantumUI",
-                ResetOnSpawn = false,
-                ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-                IgnoreGuiInset = true,
-            })
-            pcall(function()
-                if syn and syn.protect_gui then syn.protect_gui(screenGui) end
-                if gethui then screenGui.Parent = gethui()
-                else screenGui.Parent = CoreGui end
-            end)
-            if not screenGui.Parent then screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
-
-            self._mainScreenGui = screenGui
-            initNotify(screenGui)
-
-            local w, h = Library.MinSize.X, Library.MinSize.Y
-            local main = New("Frame", {
-                Name = "Main",
-                Size = UDim2.new(0, w, 0, h),
-                Position = opts.Center ~= false and UDim2.new(0.5, -w/2, 0.5, -h/2) or UDim2.new(0, 100, 0, 100),
-                BackgroundColor3 = Library.Scheme.BackgroundColor,
-                BorderSizePixel = 0,
-                Parent = screenGui,
-            })
-            RoundCorner(main, 8)
-            Stroke(main, Library.Scheme.OutlineColor, 1)
-            registerTheme(main, "BackgroundColor3", "BackgroundColor")
-
-            -- TitleBar
-            local titleBar = New("Frame", {
-                Name = "TitleBar",
-                Size = UDim2.new(1, 0, 0, 36),
-                BackgroundColor3 = Library.Scheme.HeaderColor,
-                BorderSizePixel = 0,
-                Parent = main,
-            })
-            New("UICorner", { CornerRadius = UDim.new(0, 8), Parent = titleBar })
-            -- Hide bottom rounded corners of titlebar
-            local tbMask = New("Frame", {
-                Size = UDim2.new(1, 0, 0, 10),
-                Position = UDim2.new(0, 0, 1, -10),
-                BackgroundColor3 = Library.Scheme.HeaderColor,
-                BorderSizePixel = 0,
-                Parent = titleBar,
-            })
-            registerTheme(titleBar, "BackgroundColor3", "HeaderColor")
-            registerTheme(tbMask, "BackgroundColor3", "HeaderColor")
-
-            -- Logo dot
-            local dot = New("Frame", {
-                Size = UDim2.new(0, 10, 0, 10),
-                Position = UDim2.new(0, 12, 0.5, -5),
-                BackgroundColor3 = Library.Scheme.AccentColor,
-                BorderSizePixel = 0,
-                Parent = titleBar,
-            })
-            New("UICorner", { CornerRadius = UDim.new(1, 0), Parent = dot })
-            registerTheme(dot, "BackgroundColor3", "AccentColor")
-
-            -- Title text
-            local title = New("TextLabel", {
-                Size = UDim2.new(1, -60, 1, 0),
-                Position = UDim2.new(0, 32, 0, 0),
-                BackgroundTransparency = 1,
-                Text = opts.Title or "Quantum",
-                TextColor3 = Library.Scheme.FontColor,
-                Font = Enum.Font.GothamBold,
-                TextSize = 14,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                Parent = titleBar,
-            })
-            registerTheme(title, "TextColor3", "FontColor")
-            self._title = title
-
-            -- Close button
-            local closeBtn = New("TextButton", {
-                Size = UDim2.new(0, 24, 0, 24),
-                Position = UDim2.new(1, -32, 0.5, -12),
-                BackgroundTransparency = 1,
-                Text = "×",
-                TextColor3 = Library.Scheme.MutedColor,
-                Font = Enum.Font.GothamBold,
-                TextSize = 20,
-                Parent = titleBar,
-            })
-            closeBtn.MouseButton1Click:Connect(function()
-                Library:Toggle(false)
-            end)
-
-            makeDraggable(main, titleBar)
-
-            -- Tab list (left side)
-            local tabList = New("Frame", {
-                Name = "TabList",
-                Size = UDim2.new(0, 110, 1, -36),
-                Position = UDim2.new(0, 0, 0, 36),
-                BackgroundColor3 = Library.Scheme.MainColor,
-                BorderSizePixel = 0,
-                Parent = main,
-            })
-            registerTheme(tabList, "BackgroundColor3", "MainColor")
-            Padding(tabList, 8)
-            local tabScroll = New("ScrollingFrame", {
-                Size = UDim2.new(1, 0, 1, 0),
-                BackgroundTransparency = 1,
-                BorderSizePixel = 0,
-                ScrollBarThickness = 2,
-                CanvasSize = UDim2.new(0, 0, 0, 0),
-                AutomaticCanvasSize = Enum.AutomaticSize.Y,
-                Parent = tabList,
-            })
-            local tabListLayout = ListLayout(tabScroll, Enum.FillDirection.Vertical, 4,
-                                              Enum.HorizontalAlignment.Center)
-
-            -- Content area (right side)
-            local contentArea = New("Frame", {
-                Name = "Content",
-                Size = UDim2.new(1, -110, 1, -36),
-                Position = UDim2.new(0, 110, 0, 36),
-                BackgroundTransparency = 1,
-                Parent = main,
-            })
-
-            -- Keybind frame (bottom-left overlay, outside the main window)
-            local kbFrame = New("Frame", {
-                Name = "KeybindFrame",
-                Size = UDim2.new(0, 180, 0, 100),
-                Position = UDim2.new(0, 10, 1, -110),
-                BackgroundColor3 = Library.Scheme.MainColor,
-                BorderSizePixel = 0,
-                Visible = false,
-                Parent = screenGui,
-            })
-            RoundCorner(kbFrame, 6)
-            Stroke(kbFrame, Library.Scheme.OutlineColor, 1)
-            Padding(kbFrame, 8)
-            registerTheme(kbFrame, "BackgroundColor3", "MainColor")
-            local kbTitle = New("TextLabel", {
-                Size = UDim2.new(1, 0, 0, 16),
-                BackgroundTransparency = 1,
-                Text = "Keybinds",
-                TextColor3 = Library.Scheme.MutedColor,
-                Font = Enum.Font.GothamBold,
-                TextSize = 10,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                Parent = kbFrame,
-            })
-            local kbList = New("Frame", {
-                Size = UDim2.new(1, 0, 1, -20),
-                Position = UDim2.new(0, 0, 0, 20),
-                BackgroundTransparency = 1,
-                Parent = kbFrame,
-            })
-            ListLayout(kbList, Enum.FillDirection.Vertical, 2, Enum.HorizontalAlignment.Left)
-            Library._kbFrame = kbFrame
-            Library._kbList  = kbList
-            Library._kbRows  = {}
-
-            -- Watermark (top-left)
-            local wm = New("Frame", {
-                Name = "Watermark",
-                Size = UDim2.new(0, 160, 0, 24),
-                Position = UDim2.new(0, 10, 0, 10),
-                BackgroundColor3 = Library.Scheme.MainColor,
-                BorderSizePixel = 0,
-                Visible = false,
-                Parent = screenGui,
-            })
-            RoundCorner(wm, 4)
-            Stroke(wm, Library.Scheme.OutlineColor, 1)
-            local wmLabel = New("TextLabel", {
-                Size = UDim2.new(1, -8, 1, 0),
-                Position = UDim2.new(0, 4, 0, 0),
-                BackgroundTransparency = 1,
-                Text = "Quantum",
-                TextColor3 = Library.Scheme.FontColor,
-                Font = Library.Font,
-                TextSize = 12,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                Parent = wm,
-            })
-            Library._watermark = wm
-            Library._watermarkLabel = wmLabel
-
-            -- Toggle keybind
-            local toggleKey = opts.ToggleKeybind or Library.ToggleKeybind
-            UserInputService.InputBegan:Connect(function(input, gpe)
-                if gpe then return end
-                if input.KeyCode == toggleKey then
-                    Library:Toggle()
-                end
-            end)
-
-            local win = setmetatable({
-                _main = main, _tabList = tabScroll, _tabLayout = tabListLayout,
-                _content = contentArea, _tabs = {}, _activeTab = nil, _screenGui = screenGui,
-            }, Window)
-            Library.Windows[#Library.Windows + 1] = win
-            Library._firstWindow = win
-            if opts.AutoShow == false then main.Visible = false end
-            return win
-        end
-
-        function Library:Toggle(state)
-            if state == nil then state = not self.Toggled end
-            self.Toggled = state
-            if self._mainScreenGui then
-                for _, ch in ipairs(self._mainScreenGui:GetChildren()) do
-                    if ch:IsA("Frame") and ch.Name ~= "Notifications" then
-                        ch.Visible = state
-                    end
-                end
-            end
-        end
-        function Library:SetWatermarkVisibility(v)
-            if self._watermark then self._watermark.Visible = v and true or false end
-        end
-        function Library:SetWatermark(txt)
-            if self._watermarkLabel then self._watermarkLabel.Text = tostring(txt) end
-        end
-        function Library:OnUnload(fn)
-            self._unload[#self._unload + 1] = fn
-        end
-        function Library:Unload()
-            for _, fn in ipairs(self._unload) do safeCall(fn) end
-            if self._mainScreenGui then self._mainScreenGui:Destroy() end
-        end
-
-        -- ============================================================================
-        -- Tab
-        -- ============================================================================
-        local Tab = {}; Tab.__index = Tab
-
-        function Window:AddTab(name, _icon)
-            local btn = New("TextButton", {
-                Size = UDim2.new(1, 0, 0, 28),
-                BackgroundColor3 = Library.Scheme.MainColor,
-                BackgroundTransparency = 1,
-                Text = name,
-                TextColor3 = Library.Scheme.MutedColor,
-                Font = Library.Font,
-                TextSize = 13,
-                AutoButtonColor = false,
-                Parent = self._tabList,
-            })
-            RoundCorner(btn, 4)
-
-            local content = New("Frame", {
-                Name = "TabContent_" .. name,
-                Size = UDim2.new(1, 0, 1, 0),
-                BackgroundTransparency = 1,
-                Visible = false,
-                Parent = self._content,
-            })
-            Padding(content, 10)
-            -- 2-column layout
-            local leftCol = New("Frame", {
-                Name = "LeftColumn",
-                Size = UDim2.new(0.5, -6, 1, 0),
-                Position = UDim2.new(0, 0, 0, 0),
-                BackgroundTransparency = 1,
-                Parent = content,
-            })
-            local rightCol = New("Frame", {
-                Name = "RightColumn",
-                Size = UDim2.new(0.5, -6, 1, 0),
-                Position = UDim2.new(0.5, 6, 0, 0),
-                BackgroundTransparency = 1,
-                Parent = content,
-            })
-            ListLayout(leftCol, Enum.FillDirection.Vertical, 8, Enum.HorizontalAlignment.Left)
-            ListLayout(rightCol, Enum.FillDirection.Vertical, 8, Enum.HorizontalAlignment.Left)
-
-            local tab = setmetatable({
-                _window = self, _btn = btn, _content = content, Name = name,
-                _leftCol = leftCol, _rightCol = rightCol,
-            }, Tab)
-            self._tabs[#self._tabs + 1] = tab
-            if #self._tabs == 1 then
-                self:_SwitchTab(tab)
-            end
-            btn.MouseButton1Click:Connect(function()
-                self:_SwitchTab(tab)
-            end)
-            btn.MouseEnter:Connect(function()
-                if self._activeTab ~= tab then
-                    btn.BackgroundTransparency = 0.6
-                end
-            end)
-            btn.MouseLeave:Connect(function()
-                if self._activeTab ~= tab then
-                    btn.BackgroundTransparency = 1
-                end
-            end)
-            return tab
-        end
-        Window.AddKeyTab = Window.AddTab
-
-        function Window:_SwitchTab(tab)
-            if self._activeTab then
-                self._activeTab._content.Visible = false
-                self._activeTab._btn.BackgroundTransparency = 1
-                self._activeTab._btn.TextColor3 = Library.Scheme.MutedColor
-            end
-            self._activeTab = tab
-            tab._content.Visible = true
-            tab._btn.BackgroundTransparency = 0
-            tab._btn.BackgroundColor3 = Library.Scheme.AccentColor
-            tab._btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        end
-
-        function Window:SetTitle(t) if Library._title then Library._title.Text = tostring(t) end end
-        function Window:SetFooter(_) end
-
-        -- ============================================================================
-        -- Section (Groupbox)
-        -- ============================================================================
-        local Section = {}; Section.__index = Section
-
-        local function makeGroupbox(parent, name)
-            local gb = New("Frame", {
-                Size = UDim2.new(1, 0, 0, 32),
-                AutomaticSize = Enum.AutomaticSize.Y,
-                BackgroundColor3 = Library.Scheme.MainColor,
-                BorderSizePixel = 0,
-                Parent = parent,
-            })
-            RoundCorner(gb, 6)
-            Stroke(gb, Library.Scheme.OutlineColor, 1)
-            registerTheme(gb, "BackgroundColor3", "MainColor")
-            local titleBar = New("Frame", {
-                Size = UDim2.new(1, 0, 0, 24),
-                BackgroundTransparency = 1,
-                Parent = gb,
-            })
-            New("TextLabel", {
-                Size = UDim2.new(1, -16, 1, 0),
-                Position = UDim2.new(0, 10, 0, 0),
-                BackgroundTransparency = 1,
-                Text = name or "Group",
-                TextColor3 = Library.Scheme.MutedColor,
-                Font = Enum.Font.GothamBold,
-                TextSize = 11,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                Parent = titleBar,
-            })
-            local body = New("Frame", {
-                Size = UDim2.new(1, -14, 0, 0),
-                Position = UDim2.new(0, 7, 0, 24),
-                BackgroundTransparency = 1,
-                AutomaticSize = Enum.AutomaticSize.Y,
-                Parent = gb,
-            })
-            local layout = ListLayout(body, Enum.FillDirection.Vertical, 6, Enum.HorizontalAlignment.Left)
-            layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-                gb.Size = UDim2.new(1, 0, 0, 24 + layout.AbsoluteContentSize.Y + 10)
-            end)
-            New("UIPadding", { PaddingBottom = UDim.new(0, 8), Parent = body })
-            return setmetatable({ _gb = gb, _body = body }, Section)
-        end
-
-        function Tab:AddLeftGroupbox(name)  return makeGroupbox(self._leftCol, name) end
-        function Tab:AddRightGroupbox(name) return makeGroupbox(self._rightCol, name) end
-        -- Tabbox (Linoria has these): a groupbox that lets you add sub-tabs. We flatten.
-        function Tab:AddLeftTabbox()
-            local proxy = { _tab = self, _side = "left" }
-            function proxy:AddTab(name) return makeGroupbox(self._tab._leftCol, name) end
-            return proxy
-        end
-        function Tab:AddRightTabbox()
-            local proxy = { _tab = self, _side = "right" }
-            function proxy:AddTab(name) return makeGroupbox(self._tab._rightCol, name) end
-            return proxy
-        end
-
-        function Section:AddSection(name)
-            local sub = New("Frame", {
-                Size = UDim2.new(1, 0, 0, 20),
-                AutomaticSize = Enum.AutomaticSize.Y,
-                BackgroundTransparency = 1,
-                Parent = self._body,
-            })
-            New("TextLabel", {
-                Size = UDim2.new(1, 0, 0, 16),
-                BackgroundTransparency = 1,
-                Text = name or "Section",
-                TextColor3 = Library.Scheme.MutedColor,
-                Font = Enum.Font.GothamBold,
-                TextSize = 10,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                Parent = sub,
-            })
-            local body = New("Frame", {
-                Size = UDim2.new(1, 0, 0, 0),
-                Position = UDim2.new(0, 0, 0, 18),
-                BackgroundTransparency = 1,
-                AutomaticSize = Enum.AutomaticSize.Y,
-                Parent = sub,
-            })
-            ListLayout(body, Enum.FillDirection.Vertical, 4, Enum.HorizontalAlignment.Left)
-            return setmetatable({ _gb = sub, _body = body }, Section)
-        end
-
-        function Section:AddBlank() end
-        function Section:AddDependencyBox()
-            -- Flatten: return self (nested elements go into the same section)
-            return self
-        end
-
-        -- ============================================================================
-        -- Toggle
-        -- ============================================================================
-        function Section:AddToggle(idx, opts)
-            if type(idx) == "table" then opts = idx; idx = opts.Idx end
-            opts = opts or {}
-            local text = opts.Text or opts.Name or idx or "Toggle"
-
-            local row = New("Frame", {
-                Size = UDim2.new(1, 0, 0, 22),
-                BackgroundTransparency = 1,
-                Parent = self._body,
-            })
-            local box = New("TextButton", {
-                Size = UDim2.new(0, 16, 0, 16),
-                Position = UDim2.new(0, 0, 0.5, -8),
-                BackgroundColor3 = Library.Scheme.OffColor,
-                BorderSizePixel = 0,
-                AutoButtonColor = false,
-                Text = "",
-                Parent = row,
-            })
-            RoundCorner(box, 3)
-            Stroke(box, Library.Scheme.OutlineColor, 1)
-            local label = New("TextLabel", {
-                Size = UDim2.new(1, -24, 1, 0),
-                Position = UDim2.new(0, 22, 0, 0),
-                BackgroundTransparency = 1,
-                Text = text,
-                TextColor3 = Library.Scheme.FontColor,
-                Font = Library.Font,
-                TextSize = 12,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                Parent = row,
-            })
-
-            local w = {}
-            w.Value   = opts.Default == true
-            w._changed = {}
-            if opts.Callback then table.insert(w._changed, opts.Callback) end
-
-            local function redraw()
-                if w.Value then
-                    box.BackgroundColor3 = Library.Scheme.AccentColor
-                else
-                    box.BackgroundColor3 = Library.Scheme.OffColor
-                end
-            end
-            function w:SetValue(v)
-                self.Value = v and true or false
-                redraw()
-                for _, cb in ipairs(self._changed) do safeCall(cb, self.Value) end
-                return self
-            end
-            function w:OnChanged(fn) table.insert(self._changed, fn); return self end
-            box.MouseButton1Click:Connect(function() w:SetValue(not w.Value) end)
-            label.InputBegan:Connect(function(input)
-                if input.UserInputType == Enum.UserInputType.MouseButton1 then w:SetValue(not w.Value) end
-            end)
-            redraw()
-            if opts.Default then w:SetValue(true) end
-
-            -- Chainable AddColorPicker / AddKeyPicker on toggle
-            function w:AddColorPicker(cpIdx, cpOpts)
-                if type(cpIdx) == "table" then cpOpts = cpIdx; cpIdx = nil end
-                cpOpts = cpOpts or {}
-                return Library._attachColorPicker(row, cpIdx, cpOpts, self)
-            end
-            function w:AddKeyPicker(kpIdx, kpOpts)
-                if type(kpIdx) == "table" then kpOpts = kpIdx; kpIdx = nil end
-                kpOpts = kpOpts or {}
-                return Library._attachKeyPicker(row, kpIdx, kpOpts, self)
-            end
-
-            if idx then Library.Toggles[idx] = w end
-            return w
-        end
-
-        -- ============================================================================
-        -- Slider
-        -- ============================================================================
-        function Section:AddSlider(idx, opts)
-            if type(idx) == "table" then opts = idx; idx = opts.Idx end
-            opts = opts or {}
-            local text = opts.Text or opts.Name or idx or "Slider"
-            local minV = opts.Min or 0
-            local maxV = opts.Max or 100
-            local rounding = opts.Rounding or 0
-            local suffix = opts.Suffix or ""
-
-            local row = New("Frame", {
-                Size = UDim2.new(1, 0, 0, 34),
-                BackgroundTransparency = 1,
-                Parent = self._body,
-            })
-            local label = New("TextLabel", {
-                Size = UDim2.new(1, 0, 0, 14),
-                BackgroundTransparency = 1,
-                Text = text,
-                TextColor3 = Library.Scheme.FontColor,
-                Font = Library.Font,
-                TextSize = 12,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                Parent = row,
-            })
-            local valLabel = New("TextLabel", {
-                Size = UDim2.new(0, 70, 0, 14),
-                Position = UDim2.new(1, -70, 0, 0),
-                BackgroundTransparency = 1,
-                TextColor3 = Library.Scheme.MutedColor,
-                Font = Library.Font,
-                TextSize = 11,
-                TextXAlignment = Enum.TextXAlignment.Right,
-                Parent = row,
-            })
-            local bar = New("Frame", {
-                Size = UDim2.new(1, 0, 0, 6),
-                Position = UDim2.new(0, 0, 1, -10),
-                BackgroundColor3 = Library.Scheme.OffColor,
-                BorderSizePixel = 0,
-                Parent = row,
-            })
-            RoundCorner(bar, 3)
-            local fill = New("Frame", {
-                Size = UDim2.new(0, 0, 1, 0),
-                BackgroundColor3 = Library.Scheme.AccentColor,
-                BorderSizePixel = 0,
-                Parent = bar,
-            })
-            RoundCorner(fill, 3)
-            registerTheme(fill, "BackgroundColor3", "AccentColor")
-
-            local w = {}
-            w.Value = opts.Default or minV
-            w._changed = {}
-            if opts.Callback then table.insert(w._changed, opts.Callback) end
-
-            local function redraw()
-                local pct = (w.Value - minV) / math.max(1e-6, maxV - minV)
-                fill.Size = UDim2.new(math.clamp(pct, 0, 1), 0, 1, 0)
-                local disp = round(w.Value, rounding)
-                if rounding == 0 then disp = math.floor(disp) end
-                valLabel.Text = tostring(disp) .. suffix
-            end
-            function w:SetValue(v)
-                v = clamp(tonumber(v) or minV, minV, maxV)
-                self.Value = round(v, rounding)
-                redraw()
-                for _, cb in ipairs(self._changed) do safeCall(cb, self.Value) end
-                return self
-            end
-            function w:OnChanged(fn) table.insert(self._changed, fn); return self end
-            function w:SetMin(v) minV = v; redraw() end
-            function w:SetMax(v) maxV = v; redraw() end
-
-            local dragging = false
-            local function updateFromMouse(x)
-                local abs = bar.AbsolutePosition.X
-                local size = bar.AbsoluteSize.X
-                local pct = clamp((x - abs) / math.max(1, size), 0, 1)
-                local v = minV + pct * (maxV - minV)
-                w:SetValue(v)
-            end
-            bar.InputBegan:Connect(function(input)
-                if input.UserInputType == Enum.UserInputType.MouseButton1
-                  or input.UserInputType == Enum.UserInputType.Touch then
-                    dragging = true
-                    updateFromMouse(input.Position.X)
-                end
-            end)
-            bar.InputEnded:Connect(function(input)
-                if input.UserInputType == Enum.UserInputType.MouseButton1
-                  or input.UserInputType == Enum.UserInputType.Touch then
-                    dragging = false
-                end
-            end)
-            UserInputService.InputChanged:Connect(function(input)
-                if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
-                  or input.UserInputType == Enum.UserInputType.Touch) then
-                    updateFromMouse(input.Position.X)
-                end
-            end)
-            redraw()
-            if idx then Library.Options[idx] = w end
-            return w
-        end
-
-        -- ============================================================================
-        -- Dropdown (and MultiDropdown via Multi=true)
-        -- ============================================================================
-        function Section:AddDropdown(idx, opts)
-            if type(idx) == "table" then opts = idx; idx = opts.Idx end
-            opts = opts or {}
-            local text = opts.Text or opts.Name or idx or "Dropdown"
-            local values = opts.Values or {}
-            local multi = opts.Multi and true or false
-
-            local row = New("Frame", {
-                Size = UDim2.new(1, 0, 0, 38),
-                BackgroundTransparency = 1,
-                Parent = self._body,
-            })
-            New("TextLabel", {
-                Size = UDim2.new(1, 0, 0, 14),
-                BackgroundTransparency = 1,
-                Text = text,
-                TextColor3 = Library.Scheme.FontColor,
-                Font = Library.Font,
-                TextSize = 12,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                Parent = row,
-            })
-            local btn = New("TextButton", {
-                Size = UDim2.new(1, 0, 0, 20),
-                Position = UDim2.new(0, 0, 0, 16),
-                BackgroundColor3 = Library.Scheme.OffColor,
-                BorderSizePixel = 0,
-                Text = "Select...",
-                TextColor3 = Library.Scheme.FontColor,
-                Font = Library.Font,
-                TextSize = 12,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                AutoButtonColor = false,
-                Parent = row,
-            })
-            RoundCorner(btn, 3)
-            Stroke(btn, Library.Scheme.OutlineColor, 1)
-            local btnPad = New("UIPadding", {
-                PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
-                Parent = btn,
-            })
-
-            local w = {}
-            w.Value = multi and {} or opts.Default
-            w.Values = values
-            w._changed = {}
-            if opts.Callback then table.insert(w._changed, opts.Callback) end
-
-            local function label()
-                if multi then
-                    local sel = {}
-                    for k, v in pairs(w.Value) do
-                        if v then sel[#sel + 1] = k end
-                    end
-                    if #sel == 0 then return "None" end
-                    return table.concat(sel, ", ")
-                else
-                    return tostring(w.Value or "None")
-                end
-            end
-            local function redraw() btn.Text = label() end
-
-            function w:SetValue(v)
-                if multi then
-                    if type(v) == "table" then
-                        self.Value = {}
-                        for _, k in ipairs(v) do self.Value[k] = true end
-                    else
-                        self.Value[v] = not self.Value[v]
-                    end
-                else
-                    self.Value = v
-                end
-                redraw()
-                for _, cb in ipairs(self._changed) do safeCall(cb, self.Value) end
-                return self
-            end
-            function w:SetValues(vs)
-                self.Values = vs; values = vs
-            end
-            function w:OnChanged(fn) table.insert(self._changed, fn); return self end
-
-            -- Dropdown panel (shown when clicked)
-            local panel = New("Frame", {
-                Size = UDim2.new(0, 180, 0, 0),
-                BackgroundColor3 = Library.Scheme.MainColor,
-                BorderSizePixel = 0,
-                Visible = false,
-                ZIndex = 20,
-                Parent = Library._mainScreenGui,
-            })
-            RoundCorner(panel, 4)
-            Stroke(panel, Library.Scheme.OutlineColor, 1)
-            Padding(panel, 4)
-            local pLayout = ListLayout(panel, Enum.FillDirection.Vertical, 2, Enum.HorizontalAlignment.Left)
-
-            local function rebuildPanel()
-                for _, c in ipairs(panel:GetChildren()) do
-                    if c:IsA("TextButton") then c:Destroy() end
-                end
-                for _, v in ipairs(values) do
-                    local item = New("TextButton", {
-                        Size = UDim2.new(1, 0, 0, 20),
-                        BackgroundColor3 = Library.Scheme.BackgroundColor,
-                        BorderSizePixel = 0,
-                        Text = tostring(v),
-                        TextColor3 = Library.Scheme.FontColor,
-                        Font = Library.Font,
-                        TextSize = 11,
-                        TextXAlignment = Enum.TextXAlignment.Left,
-                        AutoButtonColor = false,
-                        ZIndex = 21,
-                        Parent = panel,
-                    })
-                    RoundCorner(item, 3)
-                    New("UIPadding", {
-                        PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), Parent = item,
-                    })
-                    local sel = (multi and w.Value[v]) or (not multi and w.Value == v)
-                    if sel then item.BackgroundColor3 = Library.Scheme.AccentColor end
-                    item.MouseButton1Click:Connect(function()
-                        w:SetValue(v)
-                        rebuildPanel()
-                        if not multi then panel.Visible = false end
-                    end)
-                end
-                pLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Wait()
-                panel.Size = UDim2.new(0, 180, 0, pLayout.AbsoluteContentSize.Y + 8)
-            end
-
-            btn.MouseButton1Click:Connect(function()
-                if panel.Visible then
-                    panel.Visible = false
-                else
-                    local pos = btn.AbsolutePosition
-                    local size = btn.AbsoluteSize
-                    panel.Position = UDim2.new(0, pos.X, 0, pos.Y + size.Y + 2)
-                    panel.Visible = true
-                    rebuildPanel()
-                end
-            end)
-            -- Click-outside closes
-            UserInputService.InputBegan:Connect(function(input)
-                if not panel.Visible then return end
-                if input.UserInputType == Enum.UserInputType.MouseButton1 then
-                    local m = UserInputService:GetMouseLocation()
-                    local p, s = panel.AbsolutePosition, panel.AbsoluteSize
-                    if m.X < p.X or m.X > p.X + s.X or m.Y < p.Y or m.Y > p.Y + s.Y then
-                        local bp, bs = btn.AbsolutePosition, btn.AbsoluteSize
-                        if m.X < bp.X or m.X > bp.X + bs.X or m.Y < bp.Y or m.Y > bp.Y + bs.Y then
-                            panel.Visible = false
-                        end
-                    end
-                end
-            end)
-
-            redraw()
-            if idx then Library.Options[idx] = w end
-            return w
-        end
-
-        -- ============================================================================
-        -- Button, Label, Divider, Input
-        -- ============================================================================
-        function Section:AddButton(opts)
-            if type(opts) == "string" then opts = { Text = opts } end
-            opts = opts or {}
-            local text = opts.Text or opts.Name or "Button"
-            local fn = opts.Func or opts.Callback
-            local row = New("Frame", {
-                Size = UDim2.new(1, 0, 0, 22),
-                BackgroundTransparency = 1,
-                Parent = self._body,
-            })
-            local btn = New("TextButton", {
-                Size = UDim2.new(1, 0, 1, 0),
-                BackgroundColor3 = Library.Scheme.AccentColor,
-                BorderSizePixel = 0,
-                Text = text,
-                TextColor3 = Color3.fromRGB(255, 255, 255),
-                Font = Enum.Font.GothamBold,
-                TextSize = 11,
-                AutoButtonColor = false,
-                Parent = row,
-            })
-            RoundCorner(btn, 4)
-            registerTheme(btn, "BackgroundColor3", "AccentColor")
-            local w = { Func = fn }
-            function w:SetFunc(f) self.Func = f end
-            btn.MouseButton1Click:Connect(function() safeCall(w.Func) end)
-            btn.MouseEnter:Connect(function()
-                btn.BackgroundTransparency = 0.1
-            end)
-            btn.MouseLeave:Connect(function()
-                btn.BackgroundTransparency = 0
-            end)
-            return w
-        end
-
-        function Section:AddLabel(opts, doesWrap)
-            if type(opts) == "string" then opts = { Text = opts } end
-            opts = opts or {}
-            local text = opts.Text or ""
-            local lbl = New("TextLabel", {
-                Size = UDim2.new(1, 0, 0, 16),
-                AutomaticSize = (opts.DoesWrap or doesWrap) and Enum.AutomaticSize.Y or Enum.AutomaticSize.None,
-                BackgroundTransparency = 1,
-                Text = text,
-                TextColor3 = Library.Scheme.FontColor,
-                Font = Library.Font,
-                TextSize = 11,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                TextWrapped = (opts.DoesWrap or doesWrap) and true or false,
-                Parent = self._body,
-            })
-            local w = { Text = text }
-            function w:SetText(t) self.Text = t; lbl.Text = t end
-            return w
-        end
-
-        function Section:AddDivider()
-            New("Frame", {
-                Size = UDim2.new(1, 0, 0, 1),
-                BackgroundColor3 = Library.Scheme.OutlineColor,
-                BorderSizePixel = 0,
-                Parent = self._body,
-            })
-        end
-
-        function Section:AddInput(idx, opts)
-            if type(idx) == "table" then opts = idx; idx = opts.Idx end
-            opts = opts or {}
-            local row = New("Frame", {
-                Size = UDim2.new(1, 0, 0, 38),
-                BackgroundTransparency = 1,
-                Parent = self._body,
-            })
-            New("TextLabel", {
-                Size = UDim2.new(1, 0, 0, 14),
-                BackgroundTransparency = 1,
-                Text = opts.Text or opts.Name or idx or "Input",
-                TextColor3 = Library.Scheme.FontColor,
-                Font = Library.Font,
-                TextSize = 12,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                Parent = row,
-            })
-            local box = New("TextBox", {
-                Size = UDim2.new(1, 0, 0, 20),
-                Position = UDim2.new(0, 0, 0, 16),
-                BackgroundColor3 = Library.Scheme.OffColor,
-                BorderSizePixel = 0,
-                Text = tostring(opts.Default or ""),
-                PlaceholderText = opts.Placeholder or "",
-                TextColor3 = Library.Scheme.FontColor,
-                Font = Library.Font,
-                TextSize = 12,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                ClearTextOnFocus = false,
-                Parent = row,
-            })
-            RoundCorner(box, 3)
-            Stroke(box, Library.Scheme.OutlineColor, 1)
-            New("UIPadding", {
-                PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), Parent = box,
-            })
-            local w = { Value = tostring(opts.Default or ""), _changed = {} }
-            if opts.Callback then table.insert(w._changed, opts.Callback) end
-            function w:OnChanged(fn) table.insert(self._changed, fn); return self end
-            function w:SetValue(v) self.Value = tostring(v or ""); box.Text = self.Value
-                for _, cb in ipairs(self._changed) do safeCall(cb, self.Value) end
-            end
-            box.FocusLost:Connect(function()
-                w.Value = box.Text
-                for _, cb in ipairs(w._changed) do safeCall(cb, w.Value) end
-            end)
-            if opts.Finished then box:GetPropertyChangedSignal("Text"):Connect(function() end) end
-            if idx then Library.Options[idx] = w end
-            return w
-        end
-
-        -- ============================================================================
-        -- KeyPicker (standalone + chained on toggle)
-        -- ============================================================================
-        Library._attachKeyPicker = function(parentRow, idx, opts, parentToggle)
-            local btn = New("TextButton", {
-                Size = UDim2.new(0, 56, 0, 16),
-                Position = UDim2.new(1, -60, 0.5, -8),
-                BackgroundColor3 = Library.Scheme.OffColor,
-                BorderSizePixel = 0,
-                Text = tostring(opts.Default or "None"),
-                TextColor3 = Library.Scheme.MutedColor,
-                Font = Library.Font,
-                TextSize = 10,
-                AutoButtonColor = false,
-                Parent = parentRow,
-            })
-            RoundCorner(btn, 3)
-            local w = {
-                Value = opts.Default or "None",
-                Mode  = opts.Mode or "Toggle",
-                State = false,
-                _changed = {},
-            }
-            if opts.Callback then table.insert(w._changed, opts.Callback) end
-            local waiting = false
-            btn.MouseButton1Click:Connect(function()
-                waiting = true
-                btn.Text = "..."
-            end)
-            UserInputService.InputBegan:Connect(function(input, gpe)
-                if waiting then
-                    if input.KeyCode ~= Enum.KeyCode.Unknown then
-                        w.Value = input.KeyCode.Name
-                        btn.Text = w.Value
-                        waiting = false
-                    end
-                elseif input.KeyCode and input.KeyCode.Name == w.Value and not gpe then
-                    if w.Mode == "Toggle" then
-                        w.State = not w.State
-                    elseif w.Mode == "Hold" then
-                        w.State = true
-                    elseif w.Mode == "Always" then
-                        w.State = true
-                    end
-                    if parentToggle and opts.SyncToggleState then parentToggle:SetValue(w.State) end
-                    for _, cb in ipairs(w._changed) do safeCall(cb, w.State) end
-                end
-            end)
-            UserInputService.InputEnded:Connect(function(input, gpe)
-                if w.Mode == "Hold" and input.KeyCode and input.KeyCode.Name == w.Value then
-                    w.State = false
-                    if parentToggle and opts.SyncToggleState then parentToggle:SetValue(false) end
-                end
-            end)
-            function w:OnChanged(fn) table.insert(self._changed, fn); return self end
-            function w:SetValue(v) if type(v) == "string" then self.Value = v; btn.Text = v end end
-            function w:GetState() return self.State end
-            if idx then Library.Options[idx] = w end
-            return parentToggle or w   -- chainable on toggle
-        end
-
-        function Section:AddKeyPicker(idx, opts)
-            if type(idx) == "table" then opts = idx; idx = opts.Idx end
-            opts = opts or {}
-            local row = New("Frame", {
-                Size = UDim2.new(1, 0, 0, 22),
-                BackgroundTransparency = 1,
-                Parent = self._body,
-            })
-            New("TextLabel", {
-                Size = UDim2.new(1, -70, 1, 0),
-                BackgroundTransparency = 1,
-                Text = opts.Text or opts.Name or idx or "Keybind",
-                TextColor3 = Library.Scheme.FontColor,
-                Font = Library.Font,
-                TextSize = 12,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                Parent = row,
-            })
-            return Library._attachKeyPicker(row, idx, opts, nil)
-        end
-        Section.AddKeybind = Section.AddKeyPicker
-
-        -- ============================================================================
-        -- ColorPicker (simplified: shows color box, click to cycle preset palette)
-        -- ============================================================================
-        Library._attachColorPicker = function(parentRow, idx, opts, parentToggle)
-            local w = {
-                Value = opts.Default or Color3.fromRGB(255, 255, 255),
-                _changed = {},
-            }
-            if opts.Callback then table.insert(w._changed, opts.Callback) end
-            local btn = New("TextButton", {
-                Size = UDim2.new(0, 16, 0, 16),
-                Position = UDim2.new(1, -78, 0.5, -8),
-                BackgroundColor3 = w.Value,
-                BorderSizePixel = 0,
-                Text = "",
-                AutoButtonColor = false,
-                Parent = parentRow,
-            })
-            RoundCorner(btn, 3)
-            Stroke(btn, Library.Scheme.OutlineColor, 1)
-            -- Simple palette picker (click opens popup with preset colors)
-            local palette = {
-                Color3.fromRGB(255, 255, 255), Color3.fromRGB(0, 0, 0),
-                Color3.fromRGB(255, 60, 60),   Color3.fromRGB(60, 255, 60),
-                Color3.fromRGB(60, 120, 255),  Color3.fromRGB(255, 180, 0),
-                Color3.fromRGB(185, 131, 255), Color3.fromRGB(255, 60, 200),
-                Color3.fromRGB(0, 200, 200),   Color3.fromRGB(255, 100, 0),
-            }
-            local panel = New("Frame", {
-                Size = UDim2.new(0, 120, 0, 50),
-                BackgroundColor3 = Library.Scheme.MainColor,
-                BorderSizePixel = 0,
-                Visible = false,
-                ZIndex = 20,
-                Parent = Library._mainScreenGui,
-            })
-            RoundCorner(panel, 4)
-            Stroke(panel, Library.Scheme.OutlineColor, 1)
-            local grid = New("UIGridLayout", {
-                CellSize = UDim2.new(0, 20, 0, 20),
-                CellPadding = UDim2.new(0, 2, 0, 2),
-                Parent = panel,
-            })
-            Padding(panel, 4)
-            for _, c in ipairs(palette) do
-                local sw = New("TextButton", {
-                    BackgroundColor3 = c, BorderSizePixel = 0, Text = "", ZIndex = 21,
-                    Parent = panel,
-                })
-                RoundCorner(sw, 3)
-                sw.MouseButton1Click:Connect(function()
-                    w.Value = c
-                    btn.BackgroundColor3 = c
-                    for _, cb in ipairs(w._changed) do safeCall(cb, c) end
-                    panel.Visible = false
-                end)
-            end
-            btn.MouseButton1Click:Connect(function()
-                if panel.Visible then panel.Visible = false; return end
-                local p = btn.AbsolutePosition
-                panel.Position = UDim2.new(0, p.X - 100, 0, p.Y + 20)
-                panel.Visible = true
-            end)
-            function w:OnChanged(fn) table.insert(self._changed, fn); return self end
-            function w:SetValueRGB(c)
-                self.Value = c
-                btn.BackgroundColor3 = c
-                for _, cb in ipairs(self._changed) do safeCall(cb, c) end
-            end
-            function w:SetValue(c) self:SetValueRGB(c) end
-            if idx then Library.Options[idx] = w end
-            return parentToggle or w
-        end
-
-        -- ============================================================================
-        -- Config: SaveManager + ThemeManager addon shells (populated after window)
-        -- ============================================================================
-        local SaveManager = {
-            _folder = "Quantum/configs",
-            _ignore = {},
-            _auto = "default",
-        }
-        local function _hasFileAPI()
-            return writefile and readfile and isfile and isfolder and makefolder
-        end
-        local function _ensureFolder(p)
-            if not _hasFileAPI() then return end
-            local parts, path = {}, ""
-            for part in string.gmatch(p, "[^/]+") do parts[#parts + 1] = part end
-            for i, part in ipairs(parts) do
-                path = i == 1 and part or (path .. "/" .. part)
-                if not isfolder(path) then pcall(makefolder, path) end
-            end
-        end
-        local function _ignored(idx)
-            for _, i in ipairs(SaveManager._ignore) do if i == idx then return true end end
-            return false
-        end
-        local function _collect()
-            local s = { toggles = {}, options = {} }
-            for idx, w in pairs(Library.Toggles) do
-                if not _ignored(idx) then s.toggles[idx] = w.Value and true or false end
-            end
-            for idx, w in pairs(Library.Options) do
-                if not _ignored(idx) then
-                    local v = w.Value
-                    if typeof then
-                        if typeof(v) == "Color3" then
-                            v = { __type = "Color3", r = v.R, g = v.G, b = v.B }
-                        elseif typeof(v) == "Vector3" then
-                            v = { __type = "Vector3", x = v.X, y = v.Y, z = v.Z }
-                        end
-                    end
-                    s.options[idx] = v
-                end
-            end
-            return s
-        end
-        local function _restore(v)
-            if type(v) == "table" and v.__type == "Color3" then return Color3.new(v.r, v.g, v.b) end
-            if type(v) == "table" and v.__type == "Vector3" then return Vector3.new(v.x, v.y, v.z) end
-            return v
-        end
-        local function _apply(state)
-            if not state then return end
-            for idx, val in pairs(state.toggles or {}) do
-                local w = Library.Toggles[idx]
-                if w and w.SetValue and not _ignored(idx) then pcall(function() w:SetValue(val) end) end
-            end
-            for idx, val in pairs(state.options or {}) do
-                local w = Library.Options[idx]
-                if w and w.SetValue and not _ignored(idx) then pcall(function() w:SetValue(_restore(val)) end) end
-            end
-        end
-
-        function SaveManager:SetLibrary(_) end
-        function SaveManager:SetFolder(p) self._folder = p or "Quantum/configs"; _ensureFolder(self._folder) end
-        function SaveManager:IgnoreThemeSettings() end
-        function SaveManager:SetIgnoreIndexes(list)
-            self._ignore = {}
-            for _, idx in ipairs(list or {}) do self._ignore[#self._ignore + 1] = idx end
-        end
-        function SaveManager:Save(name)
-            if not _hasFileAPI() then
-                Library:Notify("No file API - can't save", 3); return false
-            end
-            _ensureFolder(self._folder)
-            local path = self._folder .. "/" .. tostring(name) .. ".json"
-            local ok, enc = pcall(HttpService.JSONEncode, HttpService, _collect())
-            if not ok then return false, enc end
-            local ok2, err = pcall(writefile, path, enc)
-            if ok2 then Library:Notify("Saved: " .. name, 2) end
-            return ok2, err
-        end
-        function SaveManager:Load(name)
-            if not _hasFileAPI() then return false end
-            local path = self._folder .. "/" .. tostring(name) .. ".json"
-            if not isfile(path) then return false, "not found" end
-            local ok, raw = pcall(readfile, path)
-            if not ok then return false end
-            local ok2, state = pcall(HttpService.JSONDecode, HttpService, raw)
-            if not ok2 then return false end
-            _apply(state)
-            Library:Notify("Loaded: " .. name, 2)
-            return true
-        end
-        function SaveManager:Delete(name)
-            if not delfile then return false end
-            local path = self._folder .. "/" .. tostring(name) .. ".json"
-            if isfile(path) then pcall(delfile, path); return true end
-            return false
-        end
-        function SaveManager:GetConfigs()
-            if not listfiles then return {} end
-            _ensureFolder(self._folder)
-            local out = {}
-            local ok, files = pcall(listfiles, self._folder)
-            if not ok then return out end
-            for _, f in ipairs(files) do
-                local name = f:match("([^/\\]+)%.json$")
-                if name then out[#out + 1] = name end
-            end
-            return out
-        end
-        SaveManager.RefreshConfigList = SaveManager.GetConfigs
-        function SaveManager:SetAutoloadConfig(n) self._auto = n end
-        function SaveManager:LoadAutoloadConfig()
-            if self._auto then pcall(function() self:Load(self._auto) end) end
-        end
-        function SaveManager:BuildConfigSection(parent)
-            local gb = parent
-            if type(parent.AddLeftGroupbox) == "function" then
-                gb = parent:AddLeftGroupbox("Config")
-            end
-            local nameInput = gb:AddInput("ConfigName", {
-                Default = "default", Text = "Config name",
-            })
-            gb:AddButton({ Text = "Save", Func = function()
-                local n = (nameInput.Value and #nameInput.Value > 0) and nameInput.Value or "default"
-                SaveManager:Save(n)
-            end })
-            gb:AddButton({ Text = "Load", Func = function()
-                local n = (nameInput.Value and #nameInput.Value > 0) and nameInput.Value or "default"
-                SaveManager:Load(n)
-            end })
-            gb:AddButton({ Text = "Delete", Func = function()
-                local n = (nameInput.Value and #nameInput.Value > 0) and nameInput.Value or "default"
-                SaveManager:Delete(n)
-            end })
-        end
-
-        local ThemeManager = {
-            _folder = "Quantum/themes",
-        }
-        function ThemeManager:SetLibrary(_) end
-        function ThemeManager:SetFolder(p) self._folder = p or "Quantum/themes" end
-        function ThemeManager:ApplyToTab(tab)
-            -- Build a Color section with ColorPickers for each Scheme key
-            local gb = tab:AddLeftGroupbox("Theme")
-            for key, color in pairs(Library.Scheme) do
-                if typeof(color) == "Color3" then
-                    local toggle = gb:AddToggle("Theme_" .. key, { Text = key, Default = true })
-                    toggle:AddColorPicker("ThemeCP_" .. key, {
-                        Default = color,
-                        Callback = function(c)
-                            Library.Scheme[key] = c
-                            Library:UpdateColorsUsingRegistry()
-                        end,
-                    })
-                end
-            end
-        end
-        function ThemeManager:ApplyToGroupbox(gb) self:ApplyToTab({ AddLeftGroupbox = function() return gb end }) end
-        function ThemeManager:LoadDefault() end
-
-        -- ============================================================================
-        -- Export for Linoria-compat consumers
-        -- ============================================================================
-        return {
-            Library      = Library,
-            ThemeManager = ThemeManager,
-            SaveManager  = SaveManager,
-        }
-
-    end)()
-    Library      = _uiExports.Library
-    ThemeManager = _uiExports.ThemeManager
-    SaveManager  = _uiExports.SaveManager
-    -- Expose as globals so inner cheat sections (banware/LuaXP/LuaXB) that
-    -- re-load SaveManager via loadstring can use this one instead.
-    _G.__QuantumSaveManager  = SaveManager
-    _G.__QuantumThemeManager = ThemeManager
-    _G.__QuantumLibrary      = Library
+    local repo = "https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/"
+    Library      = loadstring(game:HttpGet(repo .. "Library.lua"))()
+    ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+    SaveManager  = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
 end
-
-if not Library then error("[Quantum] UI library failed to initialize") end
+if not Library then error("[Quantum] Linoria UI failed to load") end
+_G.__QuantumSaveManager  = SaveManager
+_G.__QuantumThemeManager = ThemeManager
+_G.__QuantumLibrary      = Library
 
 
 -- =============================================================================
@@ -1547,6 +98,74 @@ end
 function AA.clear(name)
     if AA.active == name then AA.active = nil end
     AA.offCbs[name] = nil
+end
+
+-- =============================================================================
+-- [Quantum] Character safety guard
+-- Fixes "character stuck in ground / camera spinning / character jittering"
+-- on load. Blocks aggressive HRP writes until the user explicitly engages
+-- HVH via the Quantum HVH tab or Nebula counter. Any module that *does*
+-- intend to move the character on purpose should set _G.__QuantumAllowCharMove = true
+-- before writing.
+-- =============================================================================
+-- Force everything OFF on load (user explicit "all features off")
+_G.__QuantumAllowCharMove = false
+if _G.__NebulaConfig then _G.__NebulaConfig.CtrOn = false end
+_G.__QuantumRagebotOn = false
+
+_G.__QuantumCharGuard = _G.__QuantumCharGuard or { enabled = true, _conn = nil }
+do
+    local Players = game:GetService("Players")
+    local RunService = game:GetService("RunService")
+    local LocalPlayer = Players.LocalPlayer
+    local Guard = _G.__QuantumCharGuard
+    if Guard._conn then pcall(function() Guard._conn:Disconnect() end); Guard._conn = nil end
+
+    local function stabilize(char)
+        if not char then return end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not (hum and hrp) then return end
+        -- Only correct the symptoms the user reported: character laid out /
+        -- spinning crazy / stuck. Never fight an intentional move.
+        if _G.__QuantumAllowCharMove then return end
+        if hum.PlatformStand then hum.PlatformStand = false end
+        if hum.Sit then hum.Sit = false end
+        if hum.AutoRotate == false then hum.AutoRotate = true end
+        -- Clear residual spin that outlasts a module turning off
+        local av = hrp.AssemblyAngularVelocity
+        if av and av.Magnitude > 25 then
+            hrp.AssemblyAngularVelocity = Vector3.zero
+        end
+    end
+
+    local function hookChar(char)
+        if not char then return end
+        stabilize(char)
+        task.spawn(function()
+            local hum = char:WaitForChild("Humanoid", 5)
+            if hum then
+                hum:GetPropertyChangedSignal("PlatformStand"):Connect(function()
+                    if not _G.__QuantumAllowCharMove and hum.PlatformStand then
+                        hum.PlatformStand = false
+                    end
+                end)
+                hum:GetPropertyChangedSignal("AutoRotate"):Connect(function()
+                    if not _G.__QuantumAllowCharMove and hum.AutoRotate == false then
+                        hum.AutoRotate = true
+                    end
+                end)
+            end
+        end)
+    end
+
+    if LocalPlayer.Character then hookChar(LocalPlayer.Character) end
+    LocalPlayer.CharacterAdded:Connect(hookChar)
+
+    Guard._conn = RunService.Heartbeat:Connect(function()
+        if not Guard.enabled then return end
+        stabilize(LocalPlayer.Character)
+    end)
 end
 
 -- =============================================================================
@@ -40135,6 +38754,13 @@ end
 index2._RunApply = function(arg)
 local character = arg._character
 
+-- [Quantum patch] character spoof disabled by default (fixes "character looks weird")
+-- Set _G.__QuantumEnableCharSpoof = true to re-enable
+if not _G.__QuantumEnableCharSpoof then
+    arg._readyPromise = v116.resolve()
+    return
+end
+
 local v120 = fn44(character, 10):andThen(function(arg2)
 return fn48(arg._description, arg2.RigType)
 end):andThen(function(arg2)
@@ -58892,7 +57518,10 @@ local coreConfig = arg._configManager:LoadFromFile("core_config")
 if not coreConfig.Ok then
 arg:_RestoreSessionState()
 arg:_ConnectAutoSave()
-return v116.err("CosmeticsConfig", "LoadCoreConfig", string.format("Failed to load core config: %s", tostring(coreConfig.Error.Detail)))
+-- Suppress "path does not exist" on first run; create defaults silently
+pcall(function() arg._configManager:SetData(arg._data) end)
+pcall(function() arg._configManager:SaveToFile("core_config") end)
+return v116.VoidOk
 end
 
 local data = coreConfig.Value
@@ -83842,7 +82471,7 @@ if not success then
 end
 
 local ThemeManager = loadstring(game:HttpGet(repo .. 'addons/ThemeManager.lua'))()
-local SaveManager = _G.__QuantumSaveManager or loadstring(game:HttpGet(repo .. 'addons/SaveManager.lua'))()
+local SaveManager = loadstring(game:HttpGet(repo .. 'addons/SaveManager.lua'))()
 
 -- White/neutral theme matching original Banware
 local Accent = Color3.fromRGB(255, 255, 255)
@@ -84580,19 +83209,11 @@ local AALeft = Tabs.AntiAim:AddLeftGroupbox('Anti-Aim Settings')
 AddBindableToggle(AALeft, 'EnableAntiAim', 'Enable Anti-Aim', false, function(v)
     aaEnabled = v
     if v then
-        _G.__QuantumAA.requestOn("banware", function()
-            aaEnabled = false
-            pcall(stopAA)
-            if Toggles and Toggles.EnableAntiAim then
-                pcall(function() Toggles.EnableAntiAim:SetValue(false) end)
-            end
-        end)
         startAA()
-        Library:Notify("Anti-Aim (banware) enabled", 2)
+        Library:Notify("Anti-Aim enabled", 2)
     else
-        _G.__QuantumAA.clear("banware")
         stopAA()
-        Library:Notify("Anti-Aim (banware) disabled", 2)
+        Library:Notify("Anti-Aim disabled", 2)
     end
 end)
 
@@ -84629,662 +83250,6 @@ AALeft:AddSlider('AASpeed', {
     Suffix = ' Hz',
     Callback = function(v) aaCFG.SPEED = v end,
 })
-
--- =============================================================================
--- QUANTUM ELITE Anti-Aim — multi-layer (CFrame + Humanoid + Velocity + LBY)
---
--- Standard anti-aims only lie about CFrame yaw.  Modern paid-script resolvers
--- (KickHook, KickPro/Premium, Unnamed) cross-reference CFrame against:
---   * Humanoid.MoveDirection
---   * HRP.AssemblyLinearVelocity
---   * Visible rig rotation (UpperTorso Motor6D)
--- If any of those contradicts the fake yaw, their resolver converges on the
--- real angle fast.  This layer makes all four lie *coherently* so there's
--- nothing for the resolver to cross-check against.
--- =============================================================================
-do
-    local Players    = game:GetService("Players")
-    local RunService = game:GetService("RunService")
-    local LocalPlayer = Players.LocalPlayer
-
-    local ECFG = {
-        enabled      = false,
-        pattern      = "Jitter",  -- Jitter / Spin / Static / Random / Breaker
-        yaw_amp      = 90,         -- degrees
-        yaw_speed    = 60,         -- Hz
-        pitch        = "Down",     -- Down / Up / Flip / None / Zero
-        pitch_amp    = 89,
-        -- fake angle
-        fake_on      = true,
-        fake_period  = 0.3,        -- flip 180 every N seconds
-        -- LBY (upper torso vs HRP)
-        lby_on       = true,
-        lby_delta    = 60,
-        lby_jitter   = true,
-        -- Velocity spoof
-        vel_on       = true,
-        vel_mode     = "Jitter",   -- Jitter / Zero / Reverse / Random
-        vel_amp      = 16,
-        -- Move direction spoof (humanoid)
-        md_on        = true,
-        md_mode      = "Opposite", -- Opposite / Jitter / Zero
-    }
-    _G.__QuantumEliteCFG = ECFG  -- expose for UI binding below
-
-    local S = { conn = nil, t = 0, lastFlip = 0, fakeSign = 1, autoRotateBackup = true, lbyBackupC0 = nil, lbyWaist = nil }
-
-    local function restoreCharacter(char)
-        if not char then return end
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        if hum then hum.AutoRotate = S.autoRotateBackup end
-        if S.lbyWaist and S.lbyBackupC0 then
-            pcall(function() S.lbyWaist.C0 = S.lbyBackupC0 end)
-        end
-        S.lbyWaist = nil
-        S.lbyBackupC0 = nil
-    end
-
-    local function wavePattern(t)
-        local p = ECFG.pattern
-        if p == "Jitter" then
-            return math.sin(t * ECFG.yaw_speed) * ECFG.yaw_amp
-        elseif p == "Spin" then
-            return (t * ECFG.yaw_speed * 20) % 360
-        elseif p == "Static" then
-            return ECFG.yaw_amp
-        elseif p == "Random" then
-            return (math.random() * 2 - 1) * ECFG.yaw_amp
-        elseif p == "Breaker" then
-            -- Non-sinusoidal pattern specifically to foil FFT-based resolvers
-            local f = t * ECFG.yaw_speed
-            return (math.sin(f) + 0.6 * math.sin(f * 2.3) + 0.3 * math.sin(f * 5.7)) * ECFG.yaw_amp
-        end
-        return 0
-    end
-
-    local function pitchDeg(t)
-        local p = ECFG.pitch
-        if p == "Down" then return ECFG.pitch_amp
-        elseif p == "Up" then return -ECFG.pitch_amp
-        elseif p == "Flip" then
-            return (math.floor(t * 2) % 2 == 0) and ECFG.pitch_amp or -ECFG.pitch_amp
-        elseif p == "Zero" then return 0 end
-        return 0
-    end
-
-    local function tick(dt)
-        if not ECFG.enabled then return end
-        local char = LocalPlayer.Character
-        if not char then return end
-        local hrp = char:FindFirstChild("HumanoidRootPart")
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        if not hrp or not hum then return end
-
-        S.t = S.t + dt
-
-        -- Layer 1: HRP yaw + pitch
-        local yaw = wavePattern(S.t)
-        if ECFG.fake_on and (S.t - S.lastFlip) >= ECFG.fake_period then
-            S.fakeSign = -S.fakeSign
-            S.lastFlip = S.t
-        end
-        yaw = yaw * S.fakeSign
-        local pitch = math.rad(pitchDeg(S.t))
-
-        local pos = hrp.Position
-        hrp.CFrame = CFrame.new(pos) * CFrame.Angles(pitch, math.rad(yaw), 0)
-
-        -- Layer 2: Humanoid.AutoRotate off, override MoveDirection via physics
-        if hum.AutoRotate ~= false then
-            S.autoRotateBackup = hum.AutoRotate
-            hum.AutoRotate = false
-        end
-
-        -- Layer 3: LBY — rotate UpperTorso Motor6D so visible rig faces
-        -- different direction from HRP (what the resolver tries to read)
-        if ECFG.lby_on then
-            local upper = char:FindFirstChild("UpperTorso")
-            local waist = upper and upper:FindFirstChild("Waist")
-            if waist and waist:IsA("Motor6D") then
-                if not S.lbyWaist then
-                    S.lbyWaist = waist
-                    S.lbyBackupC0 = waist.C0
-                end
-                local lbyDelta = ECFG.lby_delta
-                if ECFG.lby_jitter then
-                    lbyDelta = lbyDelta + math.sin(S.t * ECFG.yaw_speed * 0.5) * 15
-                end
-                waist.C0 = S.lbyBackupC0 * CFrame.Angles(0, math.rad(lbyDelta), 0)
-            end
-        end
-
-        -- Layer 4: velocity spoof
-        if ECFG.vel_on then
-            local cur = hrp.AssemblyLinearVelocity
-            if ECFG.vel_mode == "Jitter" then
-                hrp.AssemblyLinearVelocity = Vector3.new(
-                    math.sin(S.t * 10) * ECFG.vel_amp,
-                    cur.Y,
-                    math.cos(S.t * 10) * ECFG.vel_amp
-                )
-            elseif ECFG.vel_mode == "Zero" then
-                hrp.AssemblyLinearVelocity = Vector3.new(0, cur.Y, 0)
-            elseif ECFG.vel_mode == "Reverse" then
-                hrp.AssemblyLinearVelocity = Vector3.new(-cur.X, cur.Y, -cur.Z)
-            elseif ECFG.vel_mode == "Random" then
-                hrp.AssemblyLinearVelocity = Vector3.new(
-                    (math.random() * 2 - 1) * ECFG.vel_amp,
-                    cur.Y,
-                    (math.random() * 2 - 1) * ECFG.vel_amp
-                )
-            end
-        end
-
-        -- Layer 5: Humanoid walk-direction override (makes server-side
-        -- MoveDirection point somewhere other than real movement)
-        if ECFG.md_on then
-            local md = hum.MoveDirection
-            if md.Magnitude > 0 then
-                if ECFG.md_mode == "Opposite" then
-                    hum:Move(-md, false)
-                elseif ECFG.md_mode == "Jitter" then
-                    local a = math.sin(S.t * 8) * math.rad(90)
-                    local c, s = math.cos(a), math.sin(a)
-                    hum:Move(Vector3.new(c * md.X - s * md.Z, 0, s * md.X + c * md.Z), false)
-                elseif ECFG.md_mode == "Zero" then
-                    hum:Move(Vector3.zero, false)
-                end
-            end
-        end
-    end
-
-    local function start()
-        if S.conn then return end
-        ECFG.enabled = true
-        S.t = 0
-        S.lastFlip = 0
-        S.fakeSign = 1
-        S.conn = RunService.Heartbeat:Connect(tick)
-    end
-    local function stop()
-        ECFG.enabled = false
-        if S.conn then S.conn:Disconnect(); S.conn = nil end
-        restoreCharacter(LocalPlayer.Character)
-    end
-
-    LocalPlayer.CharacterAdded:Connect(function()
-        -- Reset per-respawn state
-        S.lbyWaist = nil; S.lbyBackupC0 = nil
-    end)
-
-    -- -----------------------------------------------------------------
-    -- Presets: one-click configurations so new users don't have to tune
-    -- 12 individual knobs. Each preset writes all CFG fields at once AND
-    -- re-syncs the UI widget values so what the user sees matches.
-    -- -----------------------------------------------------------------
-    local PRESETS = {
-        ["Legit"] = {
-            desc = "Low profile. Safe for normal servers (not ragebag).",
-            pattern = "Static", yaw_amp = 20, yaw_speed = 30, pitch = "Zero", pitch_amp = 0,
-            fake_on = false, fake_period = 1.0,
-            lby_on = false, lby_delta = 0, lby_jitter = false,
-            vel_on = false, vel_mode = "Jitter", vel_amp = 0,
-            md_on = false, md_mode = "Jitter",
-        },
-        ["Rage Low"] = {
-            desc = "Mild HvH. Low jitter + fake flip. For PVP servers.",
-            pattern = "Jitter", yaw_amp = 45, yaw_speed = 60, pitch = "Down", pitch_amp = 89,
-            fake_on = true, fake_period = 0.5,
-            lby_on = true, lby_delta = 45, lby_jitter = false,
-            vel_on = false, vel_mode = "Jitter", vel_amp = 10,
-            md_on = false, md_mode = "Opposite",
-        },
-        ["Rage HvH"] = {
-            desc = "Full HvH setup. Beats most paid-script resolvers.",
-            pattern = "Jitter", yaw_amp = 90, yaw_speed = 90, pitch = "Down", pitch_amp = 89,
-            fake_on = true, fake_period = 0.3,
-            lby_on = true, lby_delta = 60, lby_jitter = true,
-            vel_on = true, vel_mode = "Jitter", vel_amp = 16,
-            md_on = true, md_mode = "Opposite",
-        },
-        ["Rage Max"] = {
-            desc = "Maximum aggression. Breaker pattern vs FFT resolvers.",
-            pattern = "Breaker", yaw_amp = 120, yaw_speed = 150, pitch = "Flip", pitch_amp = 89,
-            fake_on = true, fake_period = 0.15,
-            lby_on = true, lby_delta = 90, lby_jitter = true,
-            vel_on = true, vel_mode = "Reverse", vel_amp = 24,
-            md_on = true, md_mode = "Jitter",
-        },
-    }
-
-    -- UI: nested right-side groupbox on banware AntiAim tab
-    local EliteGB = Tabs.AntiAim:AddRightGroupbox('Elite AA Layers')
-
-    -- Preset dropdown + apply button (first thing user sees)
-    EliteGB:AddLabel('Quick Preset (recommended for first use):')
-    local presetDD = EliteGB:AddDropdown('ElitePreset', {
-        Text = 'Preset',
-        Default = 'Rage HvH',
-        Values = { 'Legit', 'Rage Low', 'Rage HvH', 'Rage Max' },
-        Callback = function(name)
-            local p = PRESETS[name]
-            if not p then return end
-            -- Write to CFG
-            for k, v in pairs(p) do
-                if k ~= "desc" then ECFG[k] = v end
-            end
-            -- Sync UI widgets so sliders/toggles reflect preset values
-            local function set(flag, val)
-                if Options and Options[flag] then
-                    pcall(function() Options[flag]:SetValue(val) end)
-                end
-                if Toggles and Toggles[flag] then
-                    pcall(function() Toggles[flag]:SetValue(val) end)
-                end
-            end
-            set('ElitePattern', p.pattern)
-            set('EliteYawAmp', p.yaw_amp)
-            set('EliteYawSpeed', p.yaw_speed)
-            set('ElitePitch', p.pitch)
-            set('EliteFake', p.fake_on)
-            set('EliteFakePeriod', p.fake_period)
-            set('EliteLBY', p.lby_on)
-            set('EliteLBYDelta', p.lby_delta)
-            set('EliteVel', p.vel_on)
-            set('EliteVelMode', p.vel_mode)
-            set('EliteMD', p.md_on)
-            set('EliteMDMode', p.md_mode)
-            pcall(function() Library:Notify("Preset: " .. name .. " - " .. p.desc, 4) end)
-        end,
-    })
-    EliteGB:AddLabel('Choose a preset above, then enable below.')
-    EliteGB:AddDivider()
-
-    local eliteToggle = EliteGB:AddToggle('EliteAA', {
-        Text = 'Enable Elite Multi-Layer AA',
-        Default = false,
-        Tooltip = 'Adds Humanoid + Velocity + LBY + MoveDir layers on top of base AA. '
-                  .. 'Specifically targets paid-script resolvers (KickHook, KickPro, Unnamed).',
-    })
-    eliteToggle:OnChanged(function(v)
-        if v then
-            _G.__QuantumAA.requestOn("elite", function()
-                stop()
-                if Toggles and Toggles.EliteAA then
-                    pcall(function() Toggles.EliteAA:SetValue(false) end)
-                end
-            end)
-            start()
-            Library:Notify("Elite AA enabled (multi-layer)", 2)
-        else
-            _G.__QuantumAA.clear("elite")
-            stop()
-            Library:Notify("Elite AA disabled", 2)
-        end
-    end)
-
-    EliteGB:AddDivider()
-    EliteGB:AddLabel('Advanced tuning (optional — preset covers most cases)')
-
-    EliteGB:AddDropdown('ElitePattern', {
-        Text = 'Yaw Pattern',
-        Default = 'Jitter',
-        Values = { 'Jitter', 'Spin', 'Static', 'Random', 'Breaker' },
-        Callback = function(v) ECFG.pattern = v end,
-    })
-    EliteGB:AddSlider('EliteYawAmp', {
-        Text = 'Yaw Amplitude', Default = 90, Min = 0, Max = 180, Rounding = 0, Suffix = '°',
-        Callback = function(v) ECFG.yaw_amp = v end,
-    })
-    EliteGB:AddSlider('EliteYawSpeed', {
-        Text = 'Yaw Speed', Default = 60, Min = 1, Max = 1000, Rounding = 0, Suffix = ' Hz',
-        Callback = function(v) ECFG.yaw_speed = v end,
-    })
-    EliteGB:AddDropdown('ElitePitch', {
-        Text = 'Pitch', Default = 'Down',
-        Values = { 'Down', 'Up', 'Flip', 'Zero' },
-        Callback = function(v) ECFG.pitch = v end,
-    })
-    EliteGB:AddToggle('EliteFake', {
-        Text = 'Fake Angle (180° flip)', Default = true,
-        Callback = function(v) ECFG.fake_on = v end,
-    })
-    EliteGB:AddSlider('EliteFakePeriod', {
-        Text = 'Fake Period', Default = 0.3, Min = 0.05, Max = 2.0, Rounding = 2, Suffix = 's',
-        Callback = function(v) ECFG.fake_period = v end,
-    })
-    EliteGB:AddToggle('EliteLBY', {
-        Text = 'LBY Split (upper torso)', Default = true,
-        Callback = function(v) ECFG.lby_on = v end,
-    })
-    EliteGB:AddSlider('EliteLBYDelta', {
-        Text = 'LBY Delta', Default = 60, Min = 0, Max = 180, Rounding = 0, Suffix = '°',
-        Callback = function(v) ECFG.lby_delta = v end,
-    })
-    EliteGB:AddToggle('EliteVel', {
-        Text = 'Velocity Spoof', Default = true,
-        Callback = function(v) ECFG.vel_on = v end,
-    })
-    EliteGB:AddDropdown('EliteVelMode', {
-        Text = 'Velocity Mode', Default = 'Jitter',
-        Values = { 'Jitter', 'Zero', 'Reverse', 'Random' },
-        Callback = function(v) ECFG.vel_mode = v end,
-    })
-    EliteGB:AddToggle('EliteMD', {
-        Text = 'MoveDirection Spoof', Default = true,
-        Callback = function(v) ECFG.md_on = v end,
-    })
-    EliteGB:AddDropdown('EliteMDMode', {
-        Text = 'MoveDir Mode', Default = 'Opposite',
-        Values = { 'Opposite', 'Jitter', 'Zero' },
-        Callback = function(v) ECFG.md_mode = v end,
-    })
-end
-
--- =============================================================================
--- QUANTUM LAG EXPLOIT framework (2026-11-03)
---
--- NOT a true server-side lag-exploit (that requires Rivals server reversing,
--- which paid scripts spent months on). This is a *generic* framework that
--- stacks four techniques to produce a similar effect without game-specific
--- knowledge:
---
---   1. Physics state desync — flip Humanoid state (Running/Jumping/Falling)
---      to confuse server extrapolation.
---   2. Micro teleport — HRP jumps around within the ~15-stud server teleport
---      detection threshold so the server never caches a "true" position.
---   3. HipHeight / RootOffset spoof — the Y coordinate the server uses for
---      hitbox is pushed off by ±8 studs.
---   4. Remote namecall choke — buffer selected outgoing FireServer calls
---      for a short burst then release (configurable by remote-name regex).
---
--- Toggle each layer independently.  Default preset is "Mild" (safer for
--- regular servers); "Choke" and "Burst" are for ragebag.
--- =============================================================================
-do
-    local Players    = game:GetService("Players")
-    local RunService = game:GetService("RunService")
-    local LocalPlayer = Players.LocalPlayer
-
-    local LAGCFG = {
-        enabled        = false,
-        pattern        = "Mild",      -- Mild / Choke / Burst / Teleport
-        -- State flip layer
-        state_flip     = true,
-        state_hz       = 10,          -- state flips per second
-        -- Micro teleport layer
-        teleport       = true,
-        tp_radius      = 12,          -- studs (server threshold is ~15-18)
-        tp_hz          = 20,
-        -- HipHeight / Y spoof layer
-        y_spoof        = true,
-        y_amp          = 4,           -- stud offset
-        y_hz           = 15,
-        -- Namecall choke layer
-        namecall_choke = false,       -- off by default (riskier)
-        choke_ms       = 200,         -- hold packets for this long
-        -- Remote filter (lua pattern); only matching remotes get choked
-        remote_pattern = "",
-    }
-    _G.__QuantumLagCFG = LAGCFG
-
-    local S = {
-        hbConn = nil,
-        acc_state = 0, acc_tp = 0, acc_y = 0,
-        orig_hip = nil, orig_state = nil,
-        packetQueue = {},
-        releaseAt = 0,
-    }
-
-    local function char()
-        return LocalPlayer.Character
-    end
-    local function restore(c)
-        c = c or char()
-        if not c then return end
-        local h = c:FindFirstChildOfClass("Humanoid")
-        if h and S.orig_hip then
-            pcall(function() h.HipHeight = S.orig_hip end)
-        end
-    end
-
-    local STATES = {
-        Enum.HumanoidStateType.Running,
-        Enum.HumanoidStateType.Jumping,
-        Enum.HumanoidStateType.Freefall,
-    }
-
-    local function tick(dt)
-        if not LAGCFG.enabled then return end
-        local c = char(); if not c then return end
-        local hrp = c:FindFirstChild("HumanoidRootPart")
-        local hum = c:FindFirstChildOfClass("Humanoid")
-        if not hrp or not hum then return end
-
-        S.acc_state = S.acc_state + dt
-        S.acc_tp    = S.acc_tp + dt
-        S.acc_y     = S.acc_y + dt
-
-        -- Layer 1: state flip
-        if LAGCFG.state_flip and S.acc_state >= 1 / LAGCFG.state_hz then
-            S.acc_state = 0
-            local nextState = STATES[math.random(#STATES)]
-            pcall(function() hum:ChangeState(nextState) end)
-        end
-
-        -- Layer 2: micro teleport within server threshold
-        if LAGCFG.teleport and S.acc_tp >= 1 / LAGCFG.tp_hz then
-            S.acc_tp = 0
-            local r = LAGCFG.tp_radius
-            local offset = Vector3.new(
-                (math.random() * 2 - 1) * r,
-                0,
-                (math.random() * 2 - 1) * r
-            )
-            local target = hrp.Position + offset
-            hrp.CFrame = CFrame.new(target) * (hrp.CFrame - hrp.CFrame.Position)
-            -- Reset back on next frame via physics (so visual stays stable)
-            task.delay(1 / LAGCFG.tp_hz / 2, function()
-                if hrp and hrp.Parent then
-                    hrp.CFrame = hrp.CFrame - offset
-                end
-            end)
-        end
-
-        -- Layer 3: HipHeight / Y spoof
-        if LAGCFG.y_spoof and S.acc_y >= 1 / LAGCFG.y_hz then
-            S.acc_y = 0
-            if not S.orig_hip then S.orig_hip = hum.HipHeight end
-            local amp = LAGCFG.y_amp
-            local new = S.orig_hip + ((math.random() * 2 - 1) * amp)
-            pcall(function() hum.HipHeight = new end)
-        end
-    end
-
-    -- Namecall hook for packet choking (layer 4)
-    local function installNamecallHook()
-        if not hookmetamethod or not getnamecallmethod then return false end
-        local oldNC
-        oldNC = hookmetamethod(game, "__namecall", function(self, ...)
-            local method = getnamecallmethod()
-            if LAGCFG.enabled and LAGCFG.namecall_choke
-              and (method == "FireServer" or method == "InvokeServer") then
-                -- Filter by remote name pattern if set
-                local okName = true
-                if LAGCFG.remote_pattern ~= "" and self.Name then
-                    okName = self.Name:find(LAGCFG.remote_pattern) ~= nil
-                end
-                if okName then
-                    -- Queue
-                    local args = { ... }
-                    table.insert(S.packetQueue, { obj = self, method = method, args = args })
-                    if S.releaseAt == 0 then
-                        S.releaseAt = os.clock() + LAGCFG.choke_ms / 1000
-                    end
-                    return  -- consume, don't send
-                end
-            end
-            return oldNC(self, ...)
-        end)
-        return true
-    end
-    installNamecallHook()
-
-    -- Release queued packets after choke_ms
-    task.spawn(function()
-        while true do
-            if S.releaseAt > 0 and os.clock() >= S.releaseAt then
-                S.releaseAt = 0
-                local q = S.packetQueue; S.packetQueue = {}
-                for _, p in ipairs(q) do
-                    pcall(function() p.obj[p.method](p.obj, unpack(p.args)) end)
-                end
-            end
-            task.wait(0.01)
-        end
-    end)
-
-    local function start()
-        if S.hbConn then return end
-        LAGCFG.enabled = true
-        local c = char()
-        if c then
-            local hum = c:FindFirstChildOfClass("Humanoid")
-            if hum then S.orig_hip = hum.HipHeight end
-        end
-        S.hbConn = RunService.Heartbeat:Connect(tick)
-    end
-    local function stop()
-        LAGCFG.enabled = false
-        if S.hbConn then S.hbConn:Disconnect(); S.hbConn = nil end
-        restore()
-        S.orig_hip = nil
-        -- Flush pending
-        local q = S.packetQueue; S.packetQueue = {}
-        S.releaseAt = 0
-        for _, p in ipairs(q) do
-            pcall(function() p.obj[p.method](p.obj, unpack(p.args)) end)
-        end
-    end
-    LocalPlayer.CharacterAdded:Connect(function()
-        S.orig_hip = nil
-    end)
-
-    -- Presets
-    local LAG_PRESETS = {
-        ["Mild"] = {
-            state_flip = false, teleport = false, y_spoof = true, y_amp = 2, y_hz = 10,
-            namecall_choke = false,
-        },
-        ["Choke"] = {
-            state_flip = true, state_hz = 8,
-            teleport = true, tp_radius = 10, tp_hz = 15,
-            y_spoof = true, y_amp = 4, y_hz = 15,
-            namecall_choke = false,
-        },
-        ["Burst"] = {
-            state_flip = true, state_hz = 15,
-            teleport = true, tp_radius = 14, tp_hz = 25,
-            y_spoof = true, y_amp = 6, y_hz = 20,
-            namecall_choke = false,
-        },
-        ["Teleport"] = {
-            state_flip = false, teleport = true, tp_radius = 14, tp_hz = 30,
-            y_spoof = false, namecall_choke = false,
-        },
-        ["Full"] = {
-            state_flip = true, state_hz = 15,
-            teleport = true, tp_radius = 14, tp_hz = 25,
-            y_spoof = true, y_amp = 8, y_hz = 20,
-            namecall_choke = true, choke_ms = 150,
-        },
-    }
-
-    -- UI
-    local LagGB = Tabs.AntiAim:AddRightGroupbox('Server Lag Exploit')
-    LagGB:AddLabel('Framework (not true server-side; mild to Full presets).')
-    LagGB:AddDropdown('LagPreset', {
-        Text = 'Preset',
-        Default = 'Mild',
-        Values = { 'Mild', 'Choke', 'Burst', 'Teleport', 'Full' },
-        Callback = function(name)
-            local p = LAG_PRESETS[name]
-            if not p then return end
-            for k, v in pairs(p) do LAGCFG[k] = v end
-            Library:Notify("Lag preset: " .. name, 2)
-        end,
-    })
-    LagGB:AddToggle('LagEnable', {
-        Text = 'Enable Lag Exploit', Default = false,
-        Tooltip = 'Stacks state desync + micro teleport + Y spoof. Full preset also chokes outgoing remotes.',
-    }):OnChanged(function(v)
-        if v then
-            _G.__QuantumAA.requestOn("lag", function()
-                stop()
-                if Toggles and Toggles.LagEnable then
-                    pcall(function() Toggles.LagEnable:SetValue(false) end)
-                end
-            end)
-            start()
-        else
-            _G.__QuantumAA.clear("lag")
-            stop()
-        end
-    end)
-    LagGB:AddDivider()
-    LagGB:AddLabel('Advanced tuning:')
-    LagGB:AddToggle('LagStateFlip', { Text = 'State flip', Default = true,
-        Callback = function(v) LAGCFG.state_flip = v end })
-    LagGB:AddSlider('LagStateHz', { Text = 'State flip Hz', Default = 10, Min = 1, Max = 30, Rounding = 0,
-        Callback = function(v) LAGCFG.state_hz = v end })
-    LagGB:AddToggle('LagTeleport', { Text = 'Micro teleport', Default = true,
-        Callback = function(v) LAGCFG.teleport = v end })
-    LagGB:AddSlider('LagTpRadius', { Text = 'Teleport radius', Default = 12, Min = 2, Max = 18, Rounding = 0,
-        Suffix = ' studs',
-        Callback = function(v) LAGCFG.tp_radius = v end })
-    LagGB:AddToggle('LagYSpoof', { Text = 'Y / HipHeight spoof', Default = true,
-        Callback = function(v) LAGCFG.y_spoof = v end })
-    LagGB:AddSlider('LagYAmp', { Text = 'Y amplitude', Default = 4, Min = 0, Max = 12, Rounding = 0,
-        Callback = function(v) LAGCFG.y_amp = v end })
-    LagGB:AddToggle('LagChoke', { Text = 'Namecall choke (risky)', Default = false,
-        Tooltip = 'Buffers FireServer calls. Can brick combat if misconfigured.',
-        Callback = function(v) LAGCFG.namecall_choke = v end })
-    LagGB:AddSlider('LagChokeMs', { Text = 'Choke duration', Default = 200, Min = 50, Max = 500, Rounding = 0,
-        Suffix = ' ms',
-        Callback = function(v) LAGCFG.choke_ms = v end })
-    LagGB:AddInput('LagRemotePattern', {
-        Text = 'Remote name pattern (Lua regex, empty = all)',
-        Default = '',
-        Callback = function(v) LAGCFG.remote_pattern = v or "" end,
-    })
-
-    -- -----------------------------------------------------------------
-    -- Quantum-style FFlag ServerLag (uses user-contributed exploit at end of file)
-    -- DFIntS2PhysicsSenderRate 120 + AssemblyHistoryBufferSize max + FallenPartsDestroyHeight NaN
-    -- -----------------------------------------------------------------
-    LagGB:AddDivider()
-    LagGB:AddLabel('Quantum-style ServerLag (real FFlag exploit):')
-    LagGB:AddToggle('QuantumServerLag', {
-        Text = 'Enable Quantum ServerLag (FFlag + void disable)',
-        Default = false,
-        Tooltip = 'Sets Roblox FFlags like Quantum: PhysicsSenderRate=120, HistoryBuffer=2^31, SkipSize=0. '
-                  .. 'Also sets FallenPartsDestroyHeight=NaN to disable void. Only works with executors '
-                  .. 'exposing setfflag + sethiddenproperty (Prism/Syntax/Fluxus/Delta).',
-    }):OnChanged(function(v)
-        if not getgenv or not getgenv().QuantumServerLag then
-            Library:Notify("Quantum ServerLag not initialized (executor missing setfflag?)", 3)
-            if Toggles and Toggles.QuantumServerLag then
-                pcall(function() Toggles.QuantumServerLag:SetValue(false) end)
-            end
-            return
-        end
-        if v then
-            getgenv().QuantumServerLag.Enable()
-        else
-            getgenv().QuantumServerLag.Disable()
-        end
-    end)
-end
 
 --==================================================
 -- SOUND EFFECTS — continuous loop + custom Keyboard/Space
@@ -85834,7 +83799,6 @@ Library:OnUnload(function()
 end)
 
 print('[Banware] Loaded Successfully | Game: ' .. GameName)
-
 ]====]
 _G.__QuantumHVH["script_3"] = [====[
 do
@@ -86172,7 +84136,7 @@ LuaXLoadingScreen()
 local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
 local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/visnoukkk/ObsidianLib/refs/heads/main/Library.lua"))()
 local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
-local SaveManager = _G.__QuantumSaveManager or loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
 
 local Options = Library.Options
 local Toggles = Library.Toggles
@@ -88623,22 +86587,7 @@ PG2:AddSlider("AntiBaitTpDist", { Text = "TP Delta (studs)", Default = 10, Min =
 PG2:AddSlider("AntiBaitRescan", { Text = "Rescan Interval (s)", Default = 2, Min = 1, Max = 60, Rounding = 0, Callback = function(v) antiBaitCFG.reScanInterval = v end })
 
 local AG = Tabs.Defense:AddLeftGroupbox("Anti-Aim")
-AddBindableToggle(AG, "AaToggle", "Enable Anti-Aim", false, function(v)
-    aaSettings.enabled = v
-    if v then
-        _G.__QuantumAA.requestOn("luaxp", function()
-            aaSettings.enabled = false
-            pcall(stopAntiAim)
-            if Toggles and Toggles.AaToggle then
-                pcall(function() Toggles.AaToggle:SetValue(false) end)
-            end
-        end)
-        startAntiAim()
-    else
-        _G.__QuantumAA.clear("luaxp")
-        stopAntiAim()
-    end
-end)
+AddBindableToggle(AG, "AaToggle", "Enable Anti-Aim", false, function(v) aaSettings.enabled = v; if v then startAntiAim() else stopAntiAim() end end)
 AG:AddDropdown("AaMode", { Text = "Mode", Default = "RandomSpin", Values = {"Spin","Jitter","Static","Up","Down","Side","RandomSpin","Custom"}, Callback = function(v) aaSettings.mode = v end })
 AG:AddSlider("AaSpeed", { Text = "Speed (deg/s)", Default = 5000, Min = 100, Max = 5000, Rounding = 0, Callback = function(v) aaSettings.speed = v end })
 AG:AddSlider("AaPitchAngle", { Text = "Pitch Angle", Default = 45, Min = 0, Max = 90, Rounding = 0, Callback = function(v) aaSettings.pitchAngle = v end })
@@ -90855,19 +88804,7 @@ local aaToggle = AL:AddToggle("AaToggle", {
     Default = false,
     Callback = function(val)
         aaCfg.enabled = val
-        if val then
-            _G.__QuantumAA.requestOn("luaxb", function()
-                aaCfg.enabled = false
-                pcall(stopAntiAim)
-                if Toggles and Toggles.AaToggle then
-                    pcall(function() Toggles.AaToggle:SetValue(false) end)
-                end
-            end)
-            startAntiAim()
-        else
-            _G.__QuantumAA.clear("luaxb")
-            stopAntiAim()
-        end
+        if val then startAntiAim() else stopAntiAim() end
     end
 })
 aaToggle:AddKeyPicker("AaKey", {
@@ -91061,7 +88998,7 @@ UIGroup:AddToggle("AutoLoad", { Text = "Auto Load Config", Default = true })
 UIGroup:AddButton("Unload Script", function() Library:Unload() end)
 
 local ThemeManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/deividcomsono/Obsidian/main/addons/ThemeManager.lua"))()
-local SaveManager = _G.__QuantumSaveManager or loadstring(game:HttpGet("https://raw.githubusercontent.com/deividcomsono/Obsidian/main/addons/SaveManager.lua"))()
+local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/deividcomsono/Obsidian/main/addons/SaveManager.lua"))()
 ThemeManager:SetLibrary(Library)
 SaveManager:SetLibrary(Library)
 SaveManager:IgnoreThemeSettings()
@@ -91270,415 +89207,135 @@ end)
 Notify("Lua x Beta v3.0 loaded", 4)
 ]====]
 -- =============================================================================
--- Nebula Counter (integrated into Quantum)
--- 3 modes: UE / Quantum / Solix
+-- Nebula Counter v2 (AntiBrain port)
+-- 3 modes: UE / Kicia / Solix. Pauses when ragebot is active.
 -- =============================================================================
 do
-    local Players = game:GetService("Players")
+    local Players    = game:GetService("Players")
     local RunService = game:GetService("RunService")
-    local Workspace = game:GetService("Workspace")
+    local Workspace  = game:GetService("Workspace")
     local LocalPlayer = Players.LocalPlayer
 
+    -- ========== config (UI-visible keys preserved for compatibility) ==========
     _G.__NebulaConfig = _G.__NebulaConfig or {
         CtrOn = false,
         CtrMode = "ue counter", -- "ue counter" | "kicia counter" | "Solix counter"
         CtrHud = true,
-        CtrQuantumCycleMs = 50,
-        CtrQuantumFlyMs = 25,
-        CtrQuantumBoost = 100000,
-        CtrQuantumBoostMs = 600,
-        CtrQuantumFlySpeed = 15000,
-        CtrQuantumZigAmp = 400,
-        CtrQuantumZigFreq = 8,
-        CtrQuantumDepth = 6,
-        CtrQuantumRadius = 30,
-        CtrVoidSpeed = 3000,
-        CtrLegits = true,
-        CtrBots = true,
-        CtrMaxLegits = 1,
-        CtrLegitDelay = 3,
-        CtrLegitStay = 35, CtrLegitGap = 50, CtrLegitLead = 6,
-        CtrBotStay = 35, CtrBotGap = 50, CtrBotLead = 6,
-    }
-    local DEFAULTS = _G.__NebulaConfig
 
-    local function cfg(key, default)
-        local v = DEFAULTS[key]
-        if v == nil then return default end
-        return v
+        -- Blink engine (used by kicia/solix)
+        CtrQuantumCycleMs    = 50,
+        CtrQuantumFlyMs      = 25,
+        CtrQuantumBoostMs    = 600,
+        CtrQuantumFlySpeed   = 15000,
+        CtrQuantumBoost      = 100000,
+        CtrQuantumZigAmp     = 400,
+        CtrQuantumZigFreq    = 8,
+        CtrQuantumDepth      = 6,
+        CtrQuantumRadius     = 30,
+
+        -- UE Legits / Bots
+        CtrLegitsOn       = true,
+        CtrLegitsStay     = 0.4,
+        CtrLegitsGap      = 0.6,
+        CtrLegitsLead     = 0.05,
+        CtrLegitsMax      = 2,
+        CtrLegitsDelay    = 3,
+        CtrLegitsPriority = "lowest health", -- or "random", "a to z", "z to a"
+        CtrBotsOn         = true,
+        CtrBotsStay       = 0.4,
+        CtrBotsGap        = 0.3,
+        CtrBotsLead       = 0.05,
+
+        -- Melee swap
+        CtrSwapToMelee  = false,
+        CtrSwapEvery    = 0.5,
+
+        -- Ally / dead
+        CtrEnemiesOnly  = true,
+        CtrAliveOnly    = true,
+    }
+    local Cfg = _G.__NebulaConfig
+    local function cfg(k, d)
+        local v = Cfg[k]; if v == nil then return d end; return v
     end
 
-    local MODE_UE, MODE_KICIA, MODE_SOLIX = "ue counter", "kicia counter", "Solix counter"
+    -- ================= Mode normalization (UI string -> internal) =================
+    local function modeOf(s)
+        if s == "kicia counter" or s == "kicia" then return "kicia"
+        elseif s == "Solix counter" or s == "solix counter" or s == "solix" then return "solix"
+        else return "ue" end
+    end
+    local function nameOfMode(m)
+        return (m == "kicia" and "KICIA") or (m == "solix" and "SOLIX") or "UE"
+    end
 
-    -- ---------- HUD ----------
-    local hudGui, hudLabel
+    -- ================= HUD =================
+    local hudGui
+    local hudLabel
     local function ensureHud()
         if hudGui and hudGui.Parent then return end
+        local gethui_ = gethui or (function() return game:GetService("CoreGui") end)
+        local parent = pcall(gethui_) and gethui_() or game:GetService("CoreGui")
         hudGui = Instance.new("ScreenGui")
         hudGui.Name = "NebulaCounterHUD"
         hudGui.ResetOnSpawn = false
         hudGui.IgnoreGuiInset = true
-        hudGui.DisplayOrder = 999
-        pcall(function() hudGui.Parent = gethui() end)
-        if not hudGui.Parent then hudGui.Parent = game:GetService("CoreGui") end
-
-        local frame = Instance.new("Frame")
-        frame.Size = UDim2.new(0, 320, 0, 42)
-        frame.Position = UDim2.new(0, 20, 0, 220)
-        frame.BackgroundColor3 = Color3.fromRGB(14, 14, 20)
-        frame.BackgroundTransparency = 0.15
-        frame.BorderSizePixel = 0
-        frame.Parent = hudGui
-        local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 8); corner.Parent = frame
-        local stroke = Instance.new("UIStroke")
-        stroke.Color = Color3.fromRGB(185, 131, 255); stroke.Thickness = 1
-        stroke.Transparency = 0.3; stroke.Parent = frame
-
+        hudGui.Parent = parent
         hudLabel = Instance.new("TextLabel")
-        hudLabel.Size = UDim2.new(1, -16, 1, 0)
-        hudLabel.Position = UDim2.new(0, 10, 0, 0)
-        hudLabel.BackgroundTransparency = 1
-        hudLabel.Text = "NEBULA COUNTER [OFF]"
-        hudLabel.TextColor3 = Color3.fromRGB(185, 131, 255)
-        hudLabel.Font = Enum.Font.GothamBold
-        hudLabel.TextSize = 13
+        hudLabel.Size = UDim2.new(0, 360, 0, 22)
+        hudLabel.Position = UDim2.new(0, 18, 0, 18)
+        hudLabel.BackgroundTransparency = 0.5
+        hudLabel.BackgroundColor3 = Color3.new(0, 0, 0)
+        hudLabel.TextColor3 = Color3.fromRGB(180, 230, 255)
+        hudLabel.TextStrokeTransparency = 0.5
+        hudLabel.Font = Enum.Font.Code
+        hudLabel.TextSize = 14
         hudLabel.TextXAlignment = Enum.TextXAlignment.Left
-        hudLabel.Parent = frame
+        hudLabel.Text = ""
+        hudLabel.Parent = hudGui
     end
-
-    local function hudTitle(mode)
-        local tag = (mode == MODE_KICIA and "KICIA") or (mode == MODE_SOLIX and "SOLIX")
-        return ("NEBULA COUNTER [%s]"):format(tag or "UE")
-    end
-
-    local function say(msg)
+    local function hud(msg)
         if not cfg("CtrHud", true) then
             if hudGui then hudGui.Enabled = false end
             return
         end
         ensureHud()
-        if hudGui then hudGui.Enabled = true end
-        if hudLabel then
-            hudLabel.Text = msg or hudTitle(cfg("CtrMode", MODE_UE))
-        end
+        hudGui.Enabled = (msg ~= nil and msg ~= "")
+        if msg and hudLabel then hudLabel.Text = msg end
     end
 
-    -- ---------- Shared state ----------
-    local K = { t0=0, boostAt=0, fly=Vector3.zero, stop=nil, stopIdx=-1, spawn=nil, list={}, last=nil }
-
-    local function cycleTimes()
-        local cycle = math.max(cfg("CtrQuantumCycleMs", 50), 5) / 1000
-        local flyWindow = math.min(cfg("CtrQuantumFlyMs", 25) / 1000, cycle * 0.95)
-        return cycle, flyWindow
+    -- ================= helpers =================
+    local function short(v)
+        local a = math.abs(v)
+        if a >= 1e6 then return string.format("%.1fM", v / 1e6)
+        elseif a >= 1e4 then return string.format("%.1fK", v / 1e3) end
+        return tostring(math.floor(v))
     end
 
-    local function makeRayParams()
-        local params = RaycastParams.new()
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        if LocalPlayer.Character then
-            params.FilterDescendantsInstances = { LocalPlayer.Character }
-        end
-        params.IgnoreWater = true
-        return params
+    local function ownRoot()
+        local ch = LocalPlayer.Character
+        if not ch then return nil end
+        local hrp = ch:FindFirstChild("HumanoidRootPart")
+        if hrp and hrp:IsA("BasePart") then return hrp, ch end
+        return nil, ch
     end
 
-    local function buildSpawnList(spawn)
-        K.spawn = spawn
-        K.list = {}
-        local params = makeRayParams()
-        local depth = cfg("CtrQuantumDepth", 6)
-        local radius = cfg("CtrQuantumRadius", 30)
-        local rng = Random.new()
-
-        for _ = 1, 60 do
-            if #K.list >= 16 then break end
-            local angle = rng:NextNumber(0, math.pi * 2)
-            local dist = rng:NextNumber(4, math.max(radius, 5))
-            local origin = spawn + Vector3.new(math.cos(angle) * dist, 8, math.sin(angle) * dist)
-            local ok, hit = pcall(function()
-                return Workspace:Raycast(origin, Vector3.new(0, -30, 0), params)
-            end)
-            if ok and hit and hit.Normal.Y > 0.7 then
-                K.list[#K.list + 1] = hit.Position - Vector3.new(0, depth, 0)
-            end
-        end
+    local function ownHumanoid()
+        local ch = LocalPlayer.Character
+        return ch and ch:FindFirstChildOfClass("Humanoid") or nil
     end
 
-    local function resolveStopPos(mode, spawn)
-        local fallback = spawn - Vector3.new(0, cfg("CtrQuantumDepth", 6), 0)
-        if mode ~= MODE_SOLIX then return fallback end
-        if K.spawn ~= spawn then buildSpawnList(spawn) end
-        local n = #K.list
-        if n == 0 then return fallback end
-        local idx = math.random(1, n)
-        if n > 1 and idx == K.last then idx = idx % n + 1 end
-        K.last = idx
-        return K.list[idx]
-    end
-
-    local function quantumSolixInit(root, now)
-        K.t0 = now
-        K.boostAt = now
-        K.spawn = root.Position
-        K.fly = root.Position
-        K.stop, K.stopIdx = nil, -1
-    end
-
-    local function quantumSolixStep(mode, root, dt)
-        local now = os.clock()
-        local t = now - K.t0
-        local cycle, flyWindow = cycleTimes()
-        local flying = (t % cycle) < flyWindow
-
-        if now >= K.boostAt then
-            if flying then
-                K.fly = K.fly + Vector3.new(0, cfg("CtrQuantumBoost", 100000), 0)
-            end
-            K.boostAt = now + cfg("CtrQuantumBoostMs", 600) / 1000
-        end
-
-        if not flying then
-            local idx = math.floor(t / cycle)
-            if idx ~= K.stopIdx or not K.stop then
-                K.stopIdx = idx
-                K.stop = resolveStopPos(mode, K.spawn)
-            end
-            root.CFrame = CFrame.new(K.stop) * CFrame.Angles(math.pi / 2, 0, 0)
-        else
-            local zig = math.cos(t * cfg("CtrQuantumZigFreq", 8)) * cfg("CtrQuantumZigAmp", 400) * dt
-            K.fly = K.fly + Vector3.new(zig, cfg("CtrQuantumFlySpeed", 15000) * dt, 0)
-            root.CFrame = CFrame.new(K.fly) * CFrame.Angles(-math.pi / 2, 0, 0)
-        end
-        root.AssemblyLinearVelocity = Vector3.zero
-    end
-
-    -- ---------- UE Counter ----------
-    local UE = { legit={last=0, inPos=false}, bot={last=0, inPos=false}, voidState=2, voidT=0, lastRandTp=0 }
-    local VOID_POS = Vector3.new(9999, 9999, 9999)
-
-    local function prepCharacter(char)
-        if not char then return end
-        pcall(function()
-            for _, p in ipairs(char:GetDescendants()) do
-                if p:IsA("BasePart") then
-                    p.CanCollide = false
-                    p.Anchored = false
-                end
-            end
-        end)
-    end
-
-    local function sendToVoid(root)
-        if not root then return end
-        pcall(function()
-            root.CFrame = CFrame.new(VOID_POS)
-            root.AssemblyLinearVelocity = Vector3.zero
-        end)
-    end
-
-    local function isUnderMap(pos)
-        local params = makeRayParams()
-        local ok, hit = pcall(function()
-            return Workspace:Raycast(pos, Vector3.new(0, 500, 0), params)
-        end)
-        return ok and hit ~= nil
-    end
-
-    local function mapCentreY()
-        -- Try to find map center from common Rivals map structure
-        local ok, y = pcall(function()
-            local maps = Workspace:FindFirstChild("Map") or Workspace:FindFirstChild("CurrentMap")
-            if maps and maps:IsA("Model") then
-                local cf, _ = maps:GetBoundingBox()
-                return cf.Position.Y
-            end
-            return 0
-        end)
-        return ok and y or 0
-    end
-
-    local function ueCounterStep(now, dt, target, isLegit, setStatus)
-        local char = LocalPlayer.Character
-        local root = char and char:FindFirstChild("HumanoidRootPart")
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if not (root and hum) then return end
-
-        prepCharacter(char)
-        pcall(function()
-            hum.PlatformStand = true
-            hum.WalkSpeed = 0
-        end)
-
-        if target then
-            local tRoot = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
-            if tRoot then
-                local P = isLegit and "Legit" or "Bot"
-                local stay = cfg("Ctr" .. P .. "Stay", 35) / 100
-                local gap = cfg("Ctr" .. P .. "Gap", 50) / 100
-                local lead = cfg("Ctr" .. P .. "Lead", 6)
-                local slot = isLegit and UE.legit or UE.bot
-
-                if not slot.inPos then
-                    if now - slot.last >= gap then slot.inPos, slot.last = true, now end
-                elseif now - slot.last >= stay then
-                    sendToVoid(root)
-                    slot.inPos, slot.last = false, now
-                end
-
-                if slot.inPos then
-                    local pos = tRoot.Position
-                    local vel = tRoot.AssemblyLinearVelocity
-                    if vel.Magnitude > 0.5 then pos = pos + vel.Unit * lead end
-
-                    if isUnderMap(pos) then
-                        sendToVoid(root)
-                        setStatus("target went under the map")
-                        return
-                    end
-                    pcall(function()
-                        root.CFrame = CFrame.new(pos + Vector3.new(0, 0, 1), pos + tRoot.CFrame.LookVector)
-                            * CFrame.Angles(-math.pi / 2, 0, 0)
-                        root.AssemblyLinearVelocity = Vector3.zero
-                    end)
-                    setStatus(("on %s"):format(target.Name:sub(1, 14)))
-                    return
-                end
-
-                sendToVoid(root)
-                setStatus(("waiting on %s"):format(target.Name:sub(1, 14)))
-                return
-            end
-        end
-
-        local elapsed = now - UE.voidT
-        if UE.voidState == 1 then
-            if elapsed >= 15 then
-                UE.voidState, UE.voidT = 2, now
-            else
-                pcall(function()
-                    root.AssemblyLinearVelocity = Vector3.new(0, cfg("CtrVoidSpeed", 3000), 0)
-                end)
-                if now - UE.lastRandTp >= 10 then
-                    UE.lastRandTp = now
-                    pcall(function()
-                        root.CFrame = CFrame.new(root.Position + Vector3.new(
-                            math.random(-2500, 2500), math.random(500, 1200), math.random(-2500, 2500)
-                        )) * CFrame.Angles(-math.pi / 2, 0, 0)
-                    end)
-                end
-            end
-        else
-            local y = root.Position.Y
-            local floorY = mapCentreY() or (y - 1000)
-            pcall(function()
-                root.CFrame = CFrame.new(root.Position.X, y - (y - floorY) * 0.5, root.Position.Z)
-                    * CFrame.Angles(-math.pi / 2, 0, 0)
-            end)
-            UE.voidState, UE.voidT, UE.lastRandTp = 1, now, now
-        end
-        setStatus("in the void")
-    end
-
-    -- ---------- Target picking ----------
-    -- Try Rivals internal API first (via _G.__QuantumControllers), fallback to heuristic
-    local lastArmTime = os.clock()
-
-    local function isBotViaRivals(player)
-        -- Try multiple ways Rivals might expose bot flag
-        local ok, result = pcall(function()
-            local controllers = _G.__QuantumControllers
-            if not controllers then return nil end
-
-            -- Attempt 1: ClientDueler per player
-            local cd = controllers.ClientDueler
-            if cd then
-                if type(cd.GetDueler) == "function" then
-                    local dueler = cd:GetDueler(player) or cd.GetDueler(player)
-                    if dueler then
-                        if dueler.IsBot ~= nil then return dueler.IsBot end
-                        if dueler.Bot ~= nil then return dueler.Bot end
-                    end
-                end
-                -- Attempt 2: Direct Objects table
-                if cd.Objects then
-                    for _, d in pairs(cd.Objects) do
-                        if d.Player == player or d._player == player then
-                            if d.IsBot ~= nil then return d.IsBot end
-                            if d.Bot ~= nil then return d.Bot end
-                        end
-                    end
-                end
-            end
-
-            -- Attempt 3: FighterController fighter lookup
-            local fc = controllers.FighterController
-            if fc then
-                if type(fc.GetFighter) == "function" then
-                    local f = fc:GetFighter(player) or fc.GetFighter(player)
-                    if f and f.IsBot ~= nil then return f.IsBot end
-                end
-                if fc.Objects then
-                    for _, f in pairs(fc.Objects) do
-                        if f.Player == player or f._player == player then
-                            if f.IsBot ~= nil then return f.IsBot end
-                        end
-                    end
-                end
-            end
-
-            return nil
-        end)
-        return ok and result
-    end
-
-    local function pickTargets()
-        local legits, bots = {}, {}
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= LocalPlayer and p.Character then
-                local tRoot = p.Character:FindFirstChild("HumanoidRootPart")
-                if tRoot then
-                    if p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team then
-                        -- skip teammates
-                    else
-                        -- Try Rivals API, fall back to heuristic
-                        local rivalsBot = isBotViaRivals(p)
-                        local isBot
-                        if rivalsBot ~= nil then
-                            isBot = rivalsBot == true
-                        else
-                            -- Heuristic: all-caps name + length > 10 = probably bot
-                            isBot = p.Name:match("^[%u%d_]+$") ~= nil and #p.Name > 10
-                        end
-                        if isBot then bots[#bots+1] = p else legits[#legits+1] = p end
-                    end
-                end
-            end
-        end
-        return legits, bots
-    end
-
-    -- ---------- Main tick ----------
-    local S = { started=false, mode=nil, status="off" }
-
-    local function counterTick(dt)
-        local now = os.clock()
-        local on = cfg("CtrOn", false)
-
-        -- Check if Ragebot is active (pause counter when raging).
-        -- Tries three sources in order: Obsidian Toggles global (most accurate),
-        -- QuantumStore under several possible path spellings, then an own-tracked global.
+    local function isRageOn()
+        -- same detection as other modules
         local rageOn = false
         pcall(function()
-            local Toggles_ = _G.Toggles or (getgenv and getgenv().Toggles) or rawget(_G, "Toggles")
-            if type(Toggles_) == "table" then
-                for name, toggle in pairs(Toggles_) do
+            local T = _G.Toggles or (getgenv and getgenv().Toggles) or rawget(_G, "Toggles")
+            if type(T) == "table" then
+                for name, tgl in pairs(T) do
                     if type(name) == "string"
                        and name:lower():find("ragebot")
                        and (name:lower():find("enable") or name:lower():find("_on_"))
-                       and toggle and toggle.Value == true then
-                        rageOn = true
-                        return
-                    end
+                       and tgl and tgl.Value == true then rageOn = true; return end
                 end
             end
             if _G.__QuantumStore then
@@ -91686,87 +89343,437 @@ do
                     {"Ragebot","Enabled"}, {"Ragebot","Enable"}, {"Ragebot","On"},
                     {"Rage","Enabled"}, {"Rage","Enable"},
                 }) do
-                    local okV, v = pcall(function() return _G.__QuantumStore:Get(path) end)
-                    if okV and v == true then rageOn = true; return end
+                    local ok, v = pcall(function() return _G.__QuantumStore:Get(path) end)
+                    if ok and v == true then rageOn = true; return end
                 end
             end
             if _G.__QuantumRagebotOn == true then rageOn = true end
         end)
+        return rageOn
+    end
+
+    -- ================= opponents =================
+    local function allyOf(player)
+        if not cfg("CtrEnemiesOnly", true) then return false end
+        local ok = pcall(function()
+            if LocalPlayer.Team and player.Team and LocalPlayer.Team == player.Team then return true end
+        end)
+        return ok and (LocalPlayer.Team ~= nil and player.Team == LocalPlayer.Team) or false
+    end
+    local function healthOf(ch)
+        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+        return hum and hum.Health or 0
+    end
+    local function listOpponents(selfPos)
+        local out = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character then
+                local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local h = healthOf(p.Character)
+                    local inside = true
+                    local dist = (hrp.Position - selfPos).Magnitude
+                    local rager = p:GetAttribute("IsRager") == true
+                                or (p.Character:GetAttribute("Rager") == true)
+                    table.insert(out, {
+                        player   = p,
+                        name     = p.Name,
+                        part     = hrp,
+                        position = hrp.Position,
+                        velocity = hrp.AssemblyLinearVelocity,
+                        health   = h,
+                        inside   = inside,
+                        ally     = allyOf(p),
+                        rager    = rager,
+                        distance = dist,
+                    })
+                end
+            end
+        end
+        return out
+    end
+
+    -- ================= Blink (AntiBrain port) =================
+    local MOST_FLYING = 0.95
+    local function blinkNew()
+        return { started=nil, fly={x=0,y=0,z=0}, boostAt=0, cycle=nil, stop=nil, spot=nil, from=nil }
+    end
+    local function blinkReset(b)
+        b.started, b.cycle, b.stop, b.spot, b.from = nil, nil, nil, nil, nil
+    end
+    local function pickSpot(b, spots, engine, rand)
+        local index = math.clamp(math.floor(rand() * #spots) + 1, 1, #spots)
+        if index == b.spot and #spots > 1 then
+            index = index % #spots + 1
+        end
+        b.spot = index
+        local spot = spots[index]
+        local angle = rand() * math.pi * 2
+        local distance = math.sqrt(rand()) * engine.spread
+        return {
+            x = spot.x + math.cos(angle) * distance,
+            y = spot.floor - engine.depth,
+            z = spot.z + math.sin(angle) * distance,
+            flying = false,
+        }
+    end
+    local function blinkPose(b, now, delta, from, spots, rand, engine)
+        if not b.started then
+            b.started = now
+            b.from = { x=from.x, y=from.y, z=from.z }
+            b.fly  = { x=from.x, y=from.y, z=from.z }
+            b.boostAt = now + engine.boostEvery
+        end
+        local home = b.from or from
+        local fly = b.fly
+        fly.y = fly.y + engine.flySpeed * delta
+        if now >= b.boostAt then
+            fly.y = fly.y + engine.boost
+            b.boostAt = now + engine.boostEvery
+        end
+        local length = math.max(engine.cycle, 0.005)
+        local elapsed = now - b.started
+        local cycle = math.floor(elapsed / length)
+        local phase = elapsed / length - cycle
+        local share = math.min(engine.flyTime / length, MOST_FLYING)
+        if phase < share or (spots and #spots == 0) then
+            return {
+                x = fly.x + math.cos(now * engine.zigFrequency) * engine.zigAmplitude,
+                y = fly.y,
+                z = fly.z,
+                flying = true,
+            }
+        end
+        if not spots then
+            return { x=home.x, y=home.y - engine.depth, z=home.z, flying=false }
+        end
+        local stop = b.stop
+        if not stop or b.cycle ~= cycle then
+            stop = pickSpot(b, spots, engine, rand)
+            b.stop, b.cycle = stop, cycle
+        end
+        return stop
+    end
+
+    -- ================= spawns (for solix mode) =================
+    local function currentMap()
+        -- Try common paths; silently return nil if unreachable
+        local m
+        pcall(function()
+            local Controllers = _G.__QuantumControllers
+            if Controllers and Controllers.SpectateController then
+                local duel = Controllers.SpectateController.CurrentDuelSubject
+                if type(duel) == "table" and type(duel.Map) == "table" then
+                    m = duel.Map.Model
+                end
+            end
+        end)
+        if not m then
+            pcall(function()
+                local games = Workspace:FindFirstChild("Map")
+                        or Workspace:FindFirstChild("Maps")
+                        or Workspace:FindFirstChild("CurrentMap")
+                if games and games:IsA("Model") then m = games end
+            end)
+        end
+        return m
+    end
+    local function spawnSpots()
+        local m = currentMap()
+        if not m then return {} end
+        local folder = m:FindFirstChild("Spawns") or m:FindFirstChild("SpawnPoints")
+        if not folder then return {} end
+        local out = {}
+        for _, part in ipairs(folder:GetDescendants()) do
+            if part:IsA("BasePart") then
+                local p = part.Position
+                table.insert(out, { x = p.X, z = p.Z, floor = p.Y - part.Size.Y / 2 })
+            end
+        end
+        return out
+    end
+    local function toSpawn()
+        local hrp = ownRoot()
+        if not hrp then return end
+        local spots = spawnSpots()
+        if #spots == 0 then return end
+        local s = spots[1]
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.CFrame = CFrame.new(s.x, s.floor + 3, s.z)
+    end
+
+    -- ================= deps (AntiBrain-style) =================
+    local CEILING    = 5000
+    local HOP_EVERY  = 4
+    local HOP_MIN, HOP_MAX = 1000, 2000
+    local LIFT       = 60
+    local random     = Random.new()
+
+    local function rand01() return random:NextNumber() end
+
+    local function lift(part, anchor)
+        part.CFrame = CFrame.new(anchor.x, anchor.y + LIFT, anchor.z) * part.CFrame.Rotation
+    end
+    local function hop(part)
+        local angle = random:NextNumber(0, math.pi * 2)
+        local distance = random:NextNumber(HOP_MIN, HOP_MAX)
+        part.CFrame = part.CFrame + Vector3.new(math.cos(angle) * distance, 0, math.sin(angle) * distance)
+    end
+    local function rise(part, speed)
+        part.AssemblyLinearVelocity = Vector3.new(0, speed, 0)
+    end
+    local function dropOnto(part, opponent, lead)
+        local pos    = opponent.position
+        local moving = opponent.velocity * Vector3.new(1, 0, 1)
+        local at
+        if moving.Magnitude > 1 then
+            at = pos + moving.Unit * lead
+        else
+            at = pos
+        end
+        part.CFrame = CFrame.new(at) * part.CFrame.Rotation
+        part.AssemblyLinearVelocity = Vector3.zero
+    end
+    local function rescue(anchor)
+        local hrp = ownRoot()
+        if not hrp then return end
+        if anchor then
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.CFrame = CFrame.new(anchor.x, anchor.y + 3, anchor.z)
+        else
+            toSpawn()
+        end
+    end
+    local function place(part, pose)
+        local pitch = pose.flying and (-math.pi / 2) or (math.pi / 2)
+        part.CFrame = CFrame.new(pose.x, pose.y, pose.z) * CFrame.Angles(pitch, 0, 0)
+        part.AssemblyLinearVelocity = Vector3.zero
+    end
+    local function replicate(part)
+        pcall(function()
+            local setId = setthreadidentity
+            local setHidden = sethiddenproperty
+            if type(setId) == "function" then setId(8) end
+            if type(setHidden) == "function" then
+                setHidden(part, "PhysicsRepRootPart", Workspace.Terrain)
+            end
+        end)
+    end
+
+    -- ================= choose target =================
+    local function allowed(op)
+        if cfg("CtrEnemiesOnly", true) and op.ally then return false end
+        if cfg("CtrAliveOnly", true) and op.health <= 0 then return false end
+        return true
+    end
+    local function pickFirst(list, priority)
+        if #list == 0 then return nil end
+        if priority == "random" then
+            return list[math.clamp(math.floor(rand01() * #list) + 1, 1, #list)]
+        end
+        local best = list[1]
+        for i = 2, #list do
+            local other = list[i]
+            local better
+            if priority == "a to z" then better = other.name < best.name
+            elseif priority == "z to a" then better = other.name > best.name
+            else better = other.health < best.health end
+            if better then best = other end
+        end
+        return best
+    end
+
+    -- ================= state =================
+    local S = {
+        life=false, born=0, hopAt=0, equipAt=0, mode=nil, last=nil,
+        blink=blinkNew(), drop=nil, nextDrop=0, anchor=nil, status=nil,
+    }
+    local function over(forget)
+        if forget then S.anchor = nil end
+        S.life=false; S.last=nil; S.drop=nil; S.nextDrop=0
+        blinkReset(S.blink)
+    end
+
+    local function engineFromCfg()
+        return {
+            flySpeed     = cfg("CtrQuantumFlySpeed", 15000),
+            zigAmplitude = cfg("CtrQuantumZigAmp", 400),
+            zigFrequency = cfg("CtrQuantumZigFreq", 8),
+            cycle        = math.max(cfg("CtrQuantumCycleMs", 50), 5) / 1000,
+            flyTime      = cfg("CtrQuantumFlyMs", 25) / 1000,
+            depth        = cfg("CtrQuantumDepth", 6),
+            boost        = cfg("CtrQuantumBoost", 100000),
+            boostEvery   = cfg("CtrQuantumBoostMs", 600) / 1000,
+            spread       = cfg("CtrQuantumRadius", 30),
+        }
+    end
+
+    -- ================= step =================
+    local function step()
+        local on = cfg("CtrOn", false)
+        local rageOn = isRageOn()
 
         if on and rageOn then
-            if S.started then S.started = false end
-            say("paused - ragebot is on")
+            if S.life then rescue(S.anchor) end
+            over(true)
+            hud("paused - ragebot is on")
             return
         end
         if not on then
-            if S.started then S.started = false end
-            if hudGui then hudGui.Enabled = false end
+            if S.life then rescue(S.anchor) end
+            over(true)
+            hud(nil)
+            _G.__QuantumAllowCharMove = false
             return
         end
 
-        local mode = cfg("CtrMode", MODE_UE)
-        if S.started and S.mode and mode ~= S.mode then
-            say(("restart to switch to %s"):format(mode))
-            mode = S.mode
+        _G.__QuantumAllowCharMove = true
+
+        local hrp, ch = ownRoot()
+        if not hrp then
+            over(true); hud("counter: no character...")
+            return
         end
 
-        local char = LocalPlayer.Character
-        local root = char and char:FindFirstChild("HumanoidRootPart")
-        if not root then say("no character") return end
+        local mode = modeOf(cfg("CtrMode", "ue counter"))
+        if S.mode ~= mode then
+            if S.life then rescue(S.anchor) end
+            over(false)
+            S.mode = mode
+        end
+        local anchor = S.anchor
+        if not anchor then
+            anchor = { x=hrp.Position.X, y=hrp.Position.Y, z=hrp.Position.Z }
+            S.anchor = anchor
+        end
+        local from = anchor
+        local opponents = listOpponents(hrp.Position)
+        local now = tick()
 
-        if not S.started then
-            S.started, S.mode = true, mode
-            if mode == MODE_KICIA or mode == MODE_SOLIX then
-                quantumSolixInit(root, now)
-            end
-            lastArmTime = now
+        -- Melee swap (optional, requires controllers)
+        if cfg("CtrSwapToMelee", false) and now >= S.equipAt then
+            pcall(function()
+                local fc = _G.__QuantumControllers and _G.__QuantumControllers.FighterController
+                local lf = fc and fc.LocalFighter
+                if lf and lf.Items then
+                    for _, it in pairs(lf.Items) do
+                        if type(it) == "table" and type(it.Info) == "table" and it.Info.Type == "Melee" then
+                            if type(lf.EquipItem) == "function" and it.Data then
+                                task.spawn(lf.EquipItem, lf, it.Data.ItemIndex)
+                                S.equipAt = now + cfg("CtrSwapEvery", 0.5)
+                            end
+                            break
+                        end
+                    end
+                end
+            end)
         end
 
-        if mode == MODE_KICIA or mode == MODE_SOLIX then
-            pcall(quantumSolixStep, mode, root, dt)
-            say(("%s - running"):format(mode))
+        local delta = S.last and (now - S.last) or 0
+        S.last = now
+        if not S.life then S.born = now end
+
+        local name = nameOfMode(mode)
+        local status
+        local target = nil
+        local fresh = false
+
+        if mode == "solix" or mode == "kicia" then
+            S.life = true
+            local spots = (mode == "solix") and spawnSpots() or nil
+            local pose = blinkPose(S.blink, now, delta, from, spots, rand01, engineFromCfg())
+            place(hrp, pose)
+            status = string.format("%s: at %s...", name, short(pose.y))
         else
-            local delay = cfg("CtrLegitDelay", 3)
-            local armed = delay <= 0 or (now - lastArmTime) >= delay
-
-            local legits, bots = pickTargets()
-            local target, isLegit = nil, false
-
-            if cfg("CtrLegits", true) and armed then
-                if #legits > 0 and #legits <= math.floor(cfg("CtrMaxLegits", 1)) then
-                    target, isLegit = legits[1], true
-                elseif #legits > math.floor(cfg("CtrMaxLegits", 1)) then
-                    say(("%d legits, over the cap"):format(#legits))
+            local drop = S.drop
+            if drop and now >= drop.ends then
+                S.drop = nil; S.nextDrop = drop.ends + drop.gap
+                drop = nil
+                lift(hrp, from)
+            end
+            if drop then
+                for _, op in ipairs(opponents) do
+                    if op.name == drop.name and op.health > 0 and allowed(op) then
+                        target = op
+                    end
+                end
+                if not target then
+                    S.drop = nil; S.nextDrop = now
+                    lift(hrp, from)
+                end
+            elseif S.life and now >= S.nextDrop then
+                local bots, legits = {}, {}
+                for _, op in ipairs(opponents) do
+                    if allowed(op) then
+                        table.insert(op.rager and bots or legits, op)
+                    end
+                end
+                local pri = cfg("CtrLegitsPriority", "lowest health")
+                local chosen, group
+                if cfg("CtrBotsOn", true) and #bots > 0 then
+                    chosen = pickFirst(bots, pri)
+                    group = {
+                        on   = true,
+                        stay = cfg("CtrBotsStay", 0.4),
+                        gap  = cfg("CtrBotsGap", 0.3),
+                        lead = cfg("CtrBotsLead", 0.05),
+                    }
+                end
+                if not chosen and cfg("CtrLegitsOn", true) then
+                    local lmax = cfg("CtrLegitsMax", 2)
+                    local ldelay = cfg("CtrLegitsDelay", 3)
+                    if #legits > 0 and #legits <= lmax and (now - S.born) >= ldelay then
+                        chosen = pickFirst(legits, pri)
+                        group = {
+                            on   = true,
+                            stay = cfg("CtrLegitsStay", 0.4),
+                            gap  = cfg("CtrLegitsGap", 0.6),
+                            lead = cfg("CtrLegitsLead", 0.05),
+                        }
+                    end
+                end
+                if chosen and group then
+                    target = chosen; fresh = true
+                    S.drop = { name=chosen.name, ends=now + group.stay, gap=group.gap, lead=group.lead }
                 end
             end
-            if not target and cfg("CtrBots", true) and #bots > 0 then
-                target, isLegit = bots[1], false
-            end
-
-            pcall(ueCounterStep, now, dt, target, isLegit, function(s) say(("%s - %s"):format(mode, s)) end)
-
-            if not armed then
-                say(("%s - legits arm in %.1fs"):format(mode, delay - (now - lastArmTime)))
-            end
-            if #legits + #bots == 0 then
-                say(("%s - nobody in server"):format(mode))
+            local dropping = S.drop
+            if target and dropping then
+                dropOnto(hrp, target, dropping.lead)
+                if fresh then replicate(hrp) end
+                status = string.format("%s: dropping on %s...", name, target.name)
+            else
+                if not S.life then
+                    S.life = true
+                    S.hopAt = now + HOP_EVERY
+                    lift(hrp, from)
+                elseif hrp.Position.Y > CEILING then
+                    lift(hrp, from)
+                elseif now >= S.hopAt then
+                    S.hopAt = now + HOP_EVERY
+                    hop(hrp)
+                end
+                rise(hrp, cfg("CtrQuantumFlySpeed", 15000))
+                status = string.format("%s: climbing...", name)
             end
         end
+        S.status = status
+        hud(status)
     end
 
-    -- Hook to RunService
+    -- ================= hook =================
     _G.__NebulaCounterConn = _G.__NebulaCounterConn or nil
-    if _G.__NebulaCounterConn then
-        pcall(function() _G.__NebulaCounterConn:Disconnect() end)
-    end
-    _G.__NebulaCounterConn = RunService.Heartbeat:Connect(counterTick)
+    if _G.__NebulaCounterConn then pcall(function() _G.__NebulaCounterConn:Disconnect() end) end
+    _G.__NebulaCounterConn = RunService.Heartbeat:Connect(function()
+        pcall(step)
+    end)
 
-    -- Public API
     _G.__NebulaCounter = {
-        config = DEFAULTS,
-        setMode = function(m) DEFAULTS.CtrMode = m end,
-        setEnabled = function(v) DEFAULTS.CtrOn = v end,
-        getStatus = function() return S.status end,
+        config     = Cfg,
+        setMode    = function(m) Cfg.CtrMode = m end,
+        setEnabled = function(v) Cfg.CtrOn   = v end,
+        getStatus  = function() return S.status end,
+        rescueNow  = function() rescue(S.anchor); over(true) end,
     }
 end
 -- =============================================================================
@@ -92644,20 +90651,20 @@ end
 
         -- ======= Right: Quantum / Solix =======
         pcall(function()
-            local G = Tab:AddRightGroupbox("Quantum / Solix - Cycle")
+            local G = Tab:AddRightGroupbox("Kicia / Solix - Cycle")
             N_slider(G, "N_CtrQuantumCycleMs", "Cycle (ms)", 10, 500, 0, "CtrQuantumCycleMs", "ms")
             N_slider(G, "N_CtrQuantumFlyMs",   "Fly Window (ms)", 5, 500, 0, "CtrQuantumFlyMs", "ms")
             N_slider(G, "N_CtrQuantumBoostMs", "Boost Every (ms)", 50, 5000, 0, "CtrQuantumBoostMs", "ms")
         end)
         pcall(function()
-            local G = Tab:AddRightGroupbox("Quantum / Solix - Motion")
+            local G = Tab:AddRightGroupbox("Kicia / Solix - Motion")
             N_slider(G, "N_CtrQuantumFlySpeed", "Fly Speed",   100, 50000, 0, "CtrQuantumFlySpeed")
             N_slider(G, "N_CtrQuantumBoost",    "Boost Power", 1000, 500000, 0, "CtrQuantumBoost")
             N_slider(G, "N_CtrQuantumZigAmp",   "Zig Amplitude", 0, 2000, 0, "CtrQuantumZigAmp")
             N_slider(G, "N_CtrQuantumZigFreq",  "Zig Frequency", 1, 30, 0, "CtrQuantumZigFreq")
         end)
         pcall(function()
-            local G = Tab:AddRightGroupbox("Quantum / Solix - Position")
+            local G = Tab:AddRightGroupbox("Kicia / Solix - Position")
             N_slider(G, "N_CtrQuantumDepth",  "Underground Depth", 0, 50, 0, "CtrQuantumDepth")
             N_slider(G, "N_CtrQuantumRadius", "Solix Spot Radius", 5, 100, 0, "CtrQuantumRadius")
         end)
@@ -93412,7 +91419,7 @@ end
         local gEsp = Tab:AddLeftGroupbox("Overlay ESP")
         gEsp:AddToggle("qvp_skel",       { Text = "Skeleton",           Default = false })
             :OnChanged(function(v) T.skeleton = v end)
-        gEsp:AddToggle("qvp_skel_out",   { Text = "Skeleton outline",   Default = true  })
+        gEsp:AddToggle("qvp_skel_out",   { Text = "Skeleton outline",   Default = false })
             :OnChanged(function(v) T.skeleton_outline = v end)
         gEsp:AddSlider("qvp_skel_thick", { Text = "Skeleton thickness", Default = 1.5, Min = 0.5, Max = 4, Rounding = 1 })
             :OnChanged(function(v) O.skel_thick = v end)
@@ -94063,12 +92070,9 @@ pcall(function()
 
         -- Auto-switch Nebula Counter mode based on detected cheat
         if preset.nebulaMode and _G.__NebulaConfig then
+            -- Only switch mode; never auto-enable CtrOn. User enables counter manually.
             if _G.__NebulaConfig.CtrMode ~= preset.nebulaMode then
                 _G.__NebulaConfig.CtrMode = preset.nebulaMode
-                -- Also force-enable the counter if ragebot is active
-                if not _G.__NebulaConfig.CtrOn then
-                    _G.__NebulaConfig.CtrOn = true
-                end
             end
         end
 
@@ -94173,14 +92177,87 @@ pcall(function()
         if Library and Library.Notify then pcall(Library.Notify, Library, text, 2) end
     end
 
-    -- Autostart with a small delay so KH store has time to load.
+    -- [Quantum] RageCounter does NOT autostart. User enables via
+    -- getgenv().QuantumRageCounter.Enable() or the Counter tab toggle.
+    M._enabled = false
+    getgenv().QuantumRageCounter = {
+        Enable  = function()
+            M.Start(bridge)
+            M._enabled = true
+            print("[Quantum] RageCounter ENABLED")
+        end,
+        Disable = function()
+            M._enabled = false
+            for _, c in ipairs(M._conn) do pcall(function() c:Disconnect() end) end
+            table.clear(M._conn)
+            print("[Quantum] RageCounter DISABLED")
+        end,
+        Toggle  = function()
+            if M._enabled then getgenv().QuantumRageCounter.Disable()
+            else getgenv().QuantumRageCounter.Enable() end
+        end,
+        IsOn    = function() return M._enabled end,
+    }
+    print("[Quantum] RageCounter ready → auto-follows ragebot state")
+
+    -- =====================================================================
+    -- Ragebot follower: RageCounter auto-enables when ragebot is on,
+    -- auto-disables when it's off. Same detection as Nebula counter uses.
+    -- =====================================================================
+    local started = false
     task.spawn(function()
         for _ = 1, 60 do
             if _G.__QuantumStore then break end
             task.wait(0.5)
         end
-        M.Start(bridge)
-        print("[Quantum] RageCounter started (behavior fingerprint → per-enemy preset)")
+        while true do
+            local rageOn = false
+            pcall(function()
+                local Toggles_ = _G.Toggles or (getgenv and getgenv().Toggles) or rawget(_G, "Toggles")
+                if type(Toggles_) == "table" then
+                    for name, toggle in pairs(Toggles_) do
+                        if type(name) == "string"
+                           and name:lower():find("ragebot")
+                           and (name:lower():find("enable") or name:lower():find("_on_"))
+                           and toggle and toggle.Value == true then
+                            rageOn = true
+                            return
+                        end
+                    end
+                end
+                if _G.__QuantumStore then
+                    for _, path in ipairs({
+                        {"Ragebot","Enabled"}, {"Ragebot","Enable"}, {"Ragebot","On"},
+                        {"Rage","Enabled"}, {"Rage","Enable"},
+                    }) do
+                        local okV, v = pcall(function() return _G.__QuantumStore:Get(path) end)
+                        if okV and v == true then rageOn = true; return end
+                    end
+                end
+                if _G.__QuantumRagebotOn == true then rageOn = true end
+            end)
+
+            if rageOn and not M._enabled then
+                if not started then
+                    M.Start(bridge); started = true
+                else
+                    M._enabled = true
+                end
+                pcall(function()
+                    if Library and Library.Notify then
+                        Library:Notify("RageCounter ON (ragebot armed)", 2)
+                    end
+                end)
+            elseif not rageOn and M._enabled then
+                M._enabled = false
+                pcall(function()
+                    if Library and Library.Notify then
+                        Library:Notify("RageCounter OFF (ragebot disarmed)", 2)
+                    end
+                end)
+            end
+            task.wait(0.5)
+        end
     end)
 end)
 
@@ -94247,10 +92324,10 @@ pcall(function()
     local LocalPlayer = Players.LocalPlayer
 
     local ACCFG = {
-        health_spoof     = false,
-        replicator_freeze = false,
-        anti_kick        = false,
-        chat_ban_bypass  = false,
+        health_spoof     = true,
+        replicator_freeze = true,
+        anti_kick        = true,
+        chat_ban_bypass  = true,
     }
     _G.__QuantumACCFG = ACCFG
 
@@ -94377,27 +92454,27 @@ pcall(function()
         ACGB:AddLabel('Extended anti-cheat bypass layers.')
         ACGB:AddToggle('ACHealthSpoof', {
             Text = 'Health spoof (always report MaxHealth)',
-            Default = false,
+            Default = true,
             Tooltip = 'Hooks Humanoid.Health getter so any read of your health returns MaxHealth. '
                     .. 'Confuses server-side health-based detection and resolver weighting.',
             Callback = function(v) ACCFG.health_spoof = v end,
         })
         ACGB:AddToggle('ACAntiKick', {
             Text = 'Anti-kick (drop kick remotes)',
-            Default = false,
+            Default = true,
             Tooltip = 'Intercepts Player:Kick, BreakJoints, and remote names matching '
                     .. '"kick/ban/disconnect/exploit" targeting us.',
             Callback = function(v) ACCFG.anti_kick = v end,
         })
         ACGB:AddToggle('ACChatBanBypass', {
             Text = 'Chat-ban bypass',
-            Default = false,
+            Default = true,
             Tooltip = 'Ignores inbound FireAllClients events named like "chatban/mute/silence".',
             Callback = function(v) ACCFG.chat_ban_bypass = v end,
         })
         ACGB:AddToggle('ACReplicatorFreeze', {
             Text = 'Replicator freeze mode',
-            Default = false,
+            Default = true,
             Tooltip = 'Enables manual network replicator freezing. Programs can call '
                     .. '_G.__QuantumFreezeReplicator(seconds) to pause outgoing replication. '
                     .. 'Ragebot can call this around shots for near-perfect lag exploit.',
