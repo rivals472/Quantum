@@ -41625,9 +41625,9 @@ pcall(function()
             local c = data:sub(i+2,i+2); local cI = b64idx[c] or 0
             local d = data:sub(i+3,i+3); local dI = b64idx[d] or 0
             local n = a*262144 + b*4096 + cI*64 + dI
-            out[#out+1] = string.char(math.floor(n/65536)%%256)
-            if c ~= "=" then out[#out+1] = string.char(math.floor(n/256)%%256) end
-            if d ~= "=" then out[#out+1] = string.char(n%%256) end
+            out[#out+1] = string.char(math.floor(n/65536) % 256)
+            if c ~= "=" then out[#out+1] = string.char(math.floor(n/256) % 256) end
+            if d ~= "=" then out[#out+1] = string.char(n % 256) end
         end
         return table.concat(out)
     end
@@ -41662,7 +41662,7 @@ pcall(function()
                 local bg = Instance.new("ImageLabel")
                 bg.Name = "QuantumRabbitBG"
                 bg.BackgroundTransparency = 1
-                bg.ImageTransparency = 0.6   -- 40%% opacity backdrop
+                bg.ImageTransparency = 0.6   -- 40% opacity backdrop
                 bg.ScaleType = Enum.ScaleType.Fit
                 bg.Size = UDim2.new(1, 0, 1, 0)
                 bg.Position = UDim2.new(0, 0, 0, 0)
@@ -42021,7 +42021,7 @@ pcall(function()
     do
         local MN = Tabs.Settings:AddLeftGroupbox("Menu")
         MN:AddKeyPicker("QV4_MN_Bind", { Text="Menu bind", Default="RightShift", NoUI=false })
-        MN:AddSlider("QV4_MN_Trans", { Text="Menu transparency", Default=100, Min=0, Max=100, Rounding=0, Suffix="%%",
+        MN:AddSlider("QV4_MN_Trans", { Text="Menu transparency", Default=100, Min=0, Max=100, Rounding=0, Suffix="%",
             Callback=function(v) Library:SetMenuOpacity(v / 100) end })
 
         local TH = Tabs.Settings:AddLeftGroupbox("Themes")
@@ -42039,7 +42039,7 @@ pcall(function()
                     _G.__QuantumSetBackground(url, nil)
                 end
             end })
-        BG:AddSlider("QV4_BG_Opacity", { Text="opacity", Default=40, Min=0, Max=100, Rounding=0, Suffix="%%",
+        BG:AddSlider("QV4_BG_Opacity", { Text="opacity", Default=40, Min=0, Max=100, Rounding=0, Suffix="%",
             Callback=function(v) if _G.__QuantumSetBackground then _G.__QuantumSetBackground(nil, v / 100) end end })
         BG:AddButton({ Text="Reset to Chiikawa",
             Func=function() if _G.__QuantumSetBackground and _G.__QuantumRabbitBG then _G.__QuantumSetBackground(_G.__QuantumRabbitBG, 0.4) end end })
